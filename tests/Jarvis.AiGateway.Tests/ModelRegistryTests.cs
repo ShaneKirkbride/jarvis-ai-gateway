@@ -82,7 +82,7 @@ public sealed class ModelRegistryTests
         return new ModelRegistry(
             new FakeDiscovery(discovered),
             [new MetaLlamaInvokeModelPayloadAdapter(), new AmazonTitanTextInvokeModelPayloadAdapter(), new MistralInvokeModelPayloadAdapter()],
-            Options.Create(options),
+            Microsoft.Extensions.Options.Options.Create(options),
             NullLogger<ModelRegistry>.Instance);
     }
 

@@ -29,7 +29,7 @@ public sealed class PolicyAndInvocationTests
             ]
         };
         var registry = CreateRegistry(options, Discovered("anthropic.claude-3-haiku-20240307-v1:0", "Anthropic"));
-        var policy = new PolicyEngine(Options.Create(options), registry);
+        var policy = new PolicyEngine(Microsoft.Extensions.Options.Options.Create(options), registry);
         var user = new UserContext("u1", "u1@example.test", new HashSet<string>(["AI-General-Users"]), new Dictionary<string, string>());
         var context = new RequestContext("r1", "c1", "itar-approved", "ITAR", true);
 
@@ -43,7 +43,7 @@ public sealed class PolicyAndInvocationTests
     public void Converse_capable_model_selects_converse_strategy()
     {
         var model = new GatewayModel { Id = "alias", Alias = "alias", BedrockModelId = "anthropic.claude-3-haiku-20240307-v1:0", SupportsConverse = true };
-        var strategy = new BedrockConverseInvocationStrategy(null!, new NullRedactor(), Options.Create(new GatewayOptions()), NullLogger<BedrockConverseInvocationStrategy>.Instance);
+        var strategy = new BedrockConverseInvocationStrategy(null!, new NullRedactor(), Microsoft.Extensions.Options.Options.Create(new GatewayOptions()), NullLogger<BedrockConverseInvocationStrategy>.Instance);
 
         Assert.True(strategy.CanHandle(model, Request("alias")));
     }
@@ -82,7 +82,7 @@ public sealed class PolicyAndInvocationTests
     private static ModelRegistry CreateRegistry(GatewayOptions options, params DiscoveredBedrockModel[] discovered) => new(
         new FakeDiscovery(discovered),
         [new MetaLlamaInvokeModelPayloadAdapter()],
-        Options.Create(options),
+        Microsoft.Extensions.Options.Options.Create(options),
         NullLogger<ModelRegistry>.Instance);
 
     private static OpenAiChatCompletionRequest Request(string model)

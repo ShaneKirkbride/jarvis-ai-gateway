@@ -7,10 +7,10 @@ This file gives future Codex/agent runs the repo-specific context needed to work
 - **Purpose:** Private AI Gateway for Open WebUI to Amazon Bedrock Runtime in AWS GovCloud.
 - **Portal assumption:** Open WebUI remains the user-facing portal. This gateway is the backend enforcement path for model traffic.
 - **Primary project:** `src/Jarvis.AiGateway/Jarvis.AiGateway.csproj`.
-- **Current project target:** `net8.0` in the checked-in `.csproj`.
-- **Current Docker base images:** `.NET 8` SDK/runtime images in `Dockerfile`.
+- **Current project target:** `net10.0` in the checked-in `.csproj`.
+- **Current Docker base images:** `.NET 10` SDK/runtime images in `Dockerfile`.
 - **Current Codex environment from setup log:** `.NET SDK 10.0.301`, host/runtime `10.0.9`, Ubuntu 24.04, SDK installed under `/root/.dotnet`.
-- **Important mismatch:** The environment is now .NET 10, but the repository still targets .NET 8. Do not ignore this. Either migrate the repo cleanly to .NET 10 or change the environment/global.json strategy to intentionally support .NET 8.
+- **Version strategy:** The repository is aligned on .NET 10 via `global.json`, `net10.0` target frameworks, pinned compatible package versions, and `.NET 10` Docker base images.
 - **Main endpoints:** `/healthz`, `/v1/models`, and `/v1/chat/completions`.
 - **Main services/interfaces:** `IPolicyEngine`, `IContentRedactor`, `IUserContextFactory`, `IRequestContextFactory`, `IBedrockChatClient`, and `IAuditLogger`.
 - **Deployment examples:** `deploy/ecs-task-definition.example.json`, `deploy/iam-task-policy.example.json`, `deploy/environment.example`, and `deploy/openwebui-provider.example.md`.
@@ -66,9 +66,9 @@ This file gives future Codex/agent runs the repo-specific context needed to work
 
 ### High-priority issues before production
 
-1. **Version mismatch:** The Codex environment is .NET 10, but the repo targets .NET 8 and the Dockerfile builds/runs .NET 8. Pick one and align SDK, target framework, Docker images, package references, and global.json.
-2. **Wildcard package versions:** Package references use versions such as `4.*` and `8.*`. Production builds should pin exact package versions or use central package management.
-3. **No tests:** Add unit tests and integration tests before refactoring or deploying.
+1. **Integration tests:** Unit coverage exists for the core service layer, but endpoint-level integration tests are still needed before production.
+2. **Central package management:** Package references are pinned, but production builds should consider central package management for easier governance.
+3. **Coverage scope:** The current 100% line-coverage check is scoped to deterministic unit-testable service code and excludes the composition root, DTO/options property bags, AWS SDK adapters, and logger plumbing from the unit coverage denominator.
 4. **Large composition root:** `Program.cs` currently wires services, middleware, endpoint logic, response mapping, SSE formatting, exception handling, and audit event creation. This is acceptable for a starter but should be decomposed before the codebase grows.
 5. **Streaming is not true token streaming:** The OpenAI-compatible streaming path emits one full response chunk after Bedrock returns. Replace with Bedrock streaming before users depend on streaming latency/cancellation.
 6. **Regex-only redaction:** Current redaction is useful as a baseline but not enough for regulated production. Integrate enterprise DLP/classification/secrets scanning.
@@ -84,7 +84,7 @@ This file gives future Codex/agent runs the repo-specific context needed to work
 
 ### Phase 1: Make it buildable and reproducible
 
-- Decide `.NET 10` vs `.NET 8` and align everything.
+- Keep the existing `.NET 10` strategy aligned across SDK pinning, target frameworks, package versions, and Docker base images.
 - Add or update `global.json` in the repository root.
 - Pin NuGet versions.
 - Add `Directory.Build.props` with nullable, analyzers, deterministic build settings, and warning policy.
