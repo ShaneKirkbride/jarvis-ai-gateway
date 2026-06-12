@@ -17,7 +17,7 @@ public sealed class ServiceApiKeyMiddleware(RequestDelegate next, IOptions<Gatew
             return;
         }
 
-        if (context.Request.Path.StartsWithSegments("/healthz"))
+        if (context.Request.Path.StartsWithSegments("/healthz") || context.Request.Path.StartsWithSegments("/readyz"))
         {
             await next(context);
             return;

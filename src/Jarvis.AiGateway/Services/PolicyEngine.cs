@@ -26,33 +26,33 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistr
         var model = await modelRegistry.FindChatModelAsync(request.Model, cancellationToken);
         if (model is null)
         {
-            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled, not allowed by policy, or not supported for chat.", null);
+            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled, not allowed by policy, or not supported for chat.", null, PolicyRuleIds.ModelNotFound);
         }
 
         if (string.IsNullOrWhiteSpace(model.BedrockModelId) || model.BedrockModelId.StartsWith("REPLACE_WITH", StringComparison.OrdinalIgnoreCase))
         {
-            return new PolicyDecision(false, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.", model);
+            return new PolicyDecision(false, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.", model, PolicyRuleIds.ModelPlaceholderId);
         }
 
         if (!model.Enabled)
         {
-            return new PolicyDecision(false, "Model is disabled.", model);
+            return new PolicyDecision(false, "Model is disabled.", model, PolicyRuleIds.ModelDisabled);
         }
 
         if (!model.HasTextOutput)
         {
-            return new PolicyDecision(false, "Model does not advertise TEXT output and cannot be used for /v1/chat/completions.", model);
+            return new PolicyDecision(false, "Model does not advertise TEXT output and cannot be used for /v1/chat/completions.", model, PolicyRuleIds.ModelNoTextOutput);
         }
 
         if (!IsUserInAllowedGroup(user, model))
         {
-            return new PolicyDecision(false, "User is not in an approved group for the requested model.", model);
+            return new PolicyDecision(false, "User is not in an approved group for the requested model.", model, PolicyRuleIds.UserGroupDenied);
         }
 
         var allPromptText = string.Join("\n", request.Messages.Select(m => m.GetTextContent()));
         if (allPromptText.Length > model.MaxInputCharacters)
         {
-            return new PolicyDecision(false, $"Prompt exceeds configured maximum input size for model alias '{model.Alias}'.", model);
+            return new PolicyDecision(false, $"Prompt exceeds configured maximum input size for model alias '{model.Alias}'.", model, PolicyRuleIds.PromptTooLarge);
         }
 
         foreach (var pattern in _options.BlockedPromptPatterns)
@@ -60,7 +60,7 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistr
             if (string.IsNullOrWhiteSpace(pattern)) continue;
             if (Regex.IsMatch(allPromptText, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
             {
-                return new PolicyDecision(false, "Prompt matched a blocked policy pattern.", model);
+                return new PolicyDecision(false, "Prompt matched a blocked policy pattern.", model, PolicyRuleIds.PromptBlockedPattern);
             }
         }
 
@@ -68,17 +68,17 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistr
         {
             if (!model.ItarApproved)
             {
-                return new PolicyDecision(false, "ITAR-labeled request attempted to use a non-ITAR-approved model.", model);
+                return new PolicyDecision(false, "ITAR-labeled request attempted to use a non-ITAR-approved model.", model, PolicyRuleIds.ItarModelDenied);
             }
 
             if (_options.RequireItarWorkspaceForItarRequests &&
                 !_options.ItarApprovedWorkspaceIds.Contains(context.WorkspaceId, StringComparer.OrdinalIgnoreCase))
             {
-                return new PolicyDecision(false, "ITAR-labeled request did not originate from an approved ITAR workspace.", model);
+                return new PolicyDecision(false, "ITAR-labeled request did not originate from an approved ITAR workspace.", model, PolicyRuleIds.ItarWorkspaceDenied);
             }
         }
 
-        return new PolicyDecision(true, "ALLOW", model);
+        return new PolicyDecision(true, "ALLOW", model, PolicyRuleIds.Allow);
     }
 
     private static bool IsUserInAllowedGroup(UserContext user, GatewayModel model)

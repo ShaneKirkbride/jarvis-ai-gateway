@@ -21,6 +21,7 @@ public sealed class GatewayOptions
     public ModelDiscoveryOptions ModelDiscovery { get; set; } = new();
     public GatewayPolicyOptions Policy { get; set; } = new();
     public StreamingOptions Streaming { get; set; } = new();
+    public RequestValidationOptions RequestValidation { get; set; } = new();
     public List<ModelRouteOptions> Models { get; set; } = [];
 }
 
@@ -60,7 +61,16 @@ public sealed class GatewayPolicyOptions
 
 public sealed class StreamingOptions
 {
-    public bool FallbackToNonStreaming { get; set; } = true;
+    public bool FallbackToNonStreaming { get; set; } = false;
+}
+
+public sealed class RequestValidationOptions
+{
+    public float MinimumTemperature { get; set; } = 0.0f;
+    public float MaximumTemperature { get; set; } = 1.0f;
+    public int MaxStopSequences { get; set; } = 4;
+    public int MaxStopSequenceCharacters { get; set; } = 200;
+    public int MaxMetadataBytes { get; set; } = 8192;
 }
 
 public sealed class ModelRouteOptions

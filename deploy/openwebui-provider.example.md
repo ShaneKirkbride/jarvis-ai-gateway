@@ -42,3 +42,7 @@ It also reads equivalent OpenAI `metadata` fields:
   }
 }
 ```
+
+## Streaming
+
+Set streaming off for this provider. The gateway currently rejects `stream=true` with a clear OpenAI-compatible HTTP 400 response until true Bedrock ConverseStream token streaming is implemented and tested.

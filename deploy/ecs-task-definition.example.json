@@ -1,7 +1,9 @@
 {
   "family": "jarvis-ai-gateway",
   "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
   "cpu": "1024",
   "memory": "2048",
   "executionRoleArn": "arn:aws-us-gov:iam::<ACCOUNT_ID>:role/JarvisAiGatewayExecutionRole",
@@ -9,7 +11,7 @@
   "containerDefinitions": [
     {
       "name": "jarvis-ai-gateway",
-      "image": "<ACCOUNT_ID>.dkr.ecr.us-gov-west-1.amazonaws.com/jarvis-ai-gateway:latest",
+      "image": "<ACCOUNT_ID>.dkr.ecr.us-gov-west-1.amazonaws.com/jarvis-ai-gateway:<IMMUTABLE_GIT_SHA_OR_RELEASE_TAG>",
       "essential": true,
       "portMappings": [
         {
@@ -19,11 +21,38 @@
         }
       ],
       "environment": [
-        { "name": "ASPNETCORE_ENVIRONMENT", "value": "Production" },
-        { "name": "Gateway__AwsRegion", "value": "us-gov-west-1" },
-        { "name": "Gateway__BedrockRuntimeEndpointDns", "value": "vpce-REPLACE.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com" },
-        { "name": "Jwt__Authority", "value": "https://login.microsoftonline.us/<TENANT_ID>/v2.0" },
-        { "name": "Jwt__Audience", "value": "api://jarvis-ai-gateway" }
+        {
+          "name": "ASPNETCORE_ENVIRONMENT",
+          "value": "Production"
+        },
+        {
+          "name": "Gateway__AwsRegion",
+          "value": "us-gov-west-1"
+        },
+        {
+          "name": "Gateway__BedrockRuntimeEndpointDns",
+          "value": "vpce-REPLACE.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com"
+        },
+        {
+          "name": "Gateway__RequireServiceApiKey",
+          "value": "true"
+        },
+        {
+          "name": "Gateway__Streaming__FallbackToNonStreaming",
+          "value": "false"
+        },
+        {
+          "name": "Gateway__ModelDiscovery__Enabled",
+          "value": "false"
+        },
+        {
+          "name": "Jwt__Authority",
+          "value": "https://login.microsoftonline.us/<TENANT_ID>/v2.0"
+        },
+        {
+          "name": "Jwt__Audience",
+          "value": "api://jarvis-ai-gateway"
+        }
       ],
       "secrets": [
         {
@@ -38,13 +67,6 @@
           "awslogs-region": "us-gov-west-1",
           "awslogs-stream-prefix": "ecs"
         }
-      },
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"],
-        "interval": 30,
-        "timeout": 5,
-        "retries": 3,
-        "startPeriod": 20
       }
     }
   ]
