@@ -48,6 +48,7 @@ public sealed class PolicyEngineMatrixTests
 
         Assert.True(nonItar.Allowed);
         Assert.Equal("ALLOW", nonItar.Reason);
+        Assert.Equal(PolicyRuleIds.Allow, nonItar.RuleId);
         Assert.True(itar.Allowed);
     }
 
@@ -63,8 +64,10 @@ public sealed class PolicyEngineMatrixTests
 
         Assert.False(disabled.Allowed);
         Assert.Equal("Model is disabled.", disabled.Reason);
+        Assert.Equal(PolicyRuleIds.ModelDisabled, disabled.RuleId);
         Assert.False(nonText.Allowed);
         Assert.Contains("TEXT output", nonText.Reason);
+        Assert.Equal(PolicyRuleIds.ModelNoTextOutput, nonText.RuleId);
     }
 
     private static async Task AssertDenied(GatewayOptions options, OpenAiChatCompletionRequest request, string expectedReason, DiscoveredBedrockModel? discovered, UserContext? user = null, RequestContext? context = null)

@@ -109,11 +109,12 @@ public sealed class ServiceFactoryAndMiddlewareTests
 
         await new ServiceApiKeyMiddleware(next, MsOptions.Create(new GatewayOptions { RequireServiceApiKey = false })).InvokeAsync(new DefaultHttpContext());
         await new ServiceApiKeyMiddleware(next, MsOptions.Create(new GatewayOptions { RequireServiceApiKey = true })).InvokeAsync(ContextForPath("/healthz"));
+        await new ServiceApiKeyMiddleware(next, MsOptions.Create(new GatewayOptions { RequireServiceApiKey = true })).InvokeAsync(ContextForPath("/readyz"));
         var valid = ContextForPath("/v1/models");
         valid.Request.Headers["X-Jarvis-Gateway-Key"] = "secret";
         await new ServiceApiKeyMiddleware(next, MsOptions.Create(new GatewayOptions { RequireServiceApiKey = true, ServiceApiKey = "secret" })).InvokeAsync(valid);
 
-        Assert.Equal(3, calls);
+        Assert.Equal(4, calls);
     }
 
     [Fact]

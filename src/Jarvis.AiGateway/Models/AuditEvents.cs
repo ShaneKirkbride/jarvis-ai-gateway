@@ -21,6 +21,7 @@ public sealed class GatewayAuditEvent
     public bool? SupportsConverse { get; set; }
     public bool? StreamingSupported { get; set; }
     public string? PolicyDecision { get; set; }
+    public string? PolicyRuleId { get; set; }
     public int? TokenEstimate { get; set; }
     public string Region { get; set; } = string.Empty;
     public int PromptCharacters { get; set; }

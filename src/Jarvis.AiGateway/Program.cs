@@ -24,7 +24,9 @@ builder.Logging.AddJsonConsole(options =>
     options.UseUtcTimestamp = true;
 });
 
-builder.Services.Configure<GatewayOptions>(builder.Configuration.GetSection("Gateway"));
+builder.Services.AddOptions<GatewayOptions>()
+    .Bind(builder.Configuration.GetSection("Gateway"))
+    .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<GatewayOptions>, GatewayOptionsValidator>();
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 
@@ -139,6 +141,9 @@ builder.Services.AddSingleton<IInvokeModelPayloadAdapter, MetaLlamaInvokeModelPa
 builder.Services.AddSingleton<IInvokeModelPayloadAdapter, MistralInvokeModelPayloadAdapter>();
 builder.Services.AddSingleton<IModelRegistry, ModelRegistry>();
 builder.Services.AddSingleton<IPolicyEngine, PolicyEngine>();
+builder.Services.AddSingleton<IOpenAiChatRequestValidator, OpenAiChatRequestValidator>();
+builder.Services.AddSingleton<IReadinessCheck, GatewayReadinessCheck>();
+builder.Services.AddSingleton<IGatewayMetrics, GatewayMetrics>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockConverseInvocationStrategy>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockInvokeModelTextInvocationStrategy>();
 builder.Services.AddSingleton<IAuditLogger, AuditLogger>();
@@ -158,6 +163,17 @@ app.MapGet("/healthz", () => Results.Ok(new
     environment = gatewayOptions.EnvironmentName,
     timeUtc = DateTimeOffset.UtcNow
 }));
+
+app.MapGet("/readyz", (IReadinessCheck readinessCheck) =>
+{
+    var result = readinessCheck.Check();
+    return Results.Json(new
+    {
+        status = result.Ready ? "ready" : "not_ready",
+        failedChecks = result.FailedChecks,
+        timeUtc = DateTimeOffset.UtcNow
+    }, statusCode: result.Ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+});
 
 app.MapGet("/v1/models", async (
         ClaimsPrincipal principal,
@@ -184,6 +200,8 @@ app.MapPost("/v1/chat/completions", async (
         IUserContextFactory userContextFactory,
         IRequestContextFactory requestContextFactory,
         IPolicyEngine policyEngine,
+        IOpenAiChatRequestValidator requestValidator,
+        IGatewayMetrics metrics,
         IEnumerable<IBedrockInvocationStrategy> strategies,
         IContentRedactor redactor,
         IAuditLogger auditLogger,
@@ -193,7 +211,7 @@ app.MapPost("/v1/chat/completions", async (
         var stopwatch = Stopwatch.StartNew();
         var user = userContextFactory.Create(httpContext.User);
         var requestContext = requestContextFactory.Create(httpContext, request);
-        var promptText = string.Join("\n", request.Messages.Select(m => m.GetTextContent()));
+        var promptText = string.Empty;
         var audit = new GatewayAuditEvent
         {
             RequestId = requestContext.RequestId,
@@ -204,20 +222,25 @@ app.MapPost("/v1/chat/completions", async (
             WorkspaceId = requestContext.WorkspaceId,
             DataLabel = requestContext.DataLabel,
             ItarMode = requestContext.ItarMode,
-            RequestedModelAlias = request.Model,
+            RequestedModelAlias = request.Model ?? string.Empty,
             Region = options.Value.AwsRegion,
             EndpointMode = string.IsNullOrWhiteSpace(options.Value.BedrockRuntimeEndpointDns) ? "regional-dns" : "vpce-override",
-            PromptCharacters = promptText.Length
+            PromptCharacters = 0
         };
 
         try
         {
-            if (request.Stream && !options.Value.Streaming.FallbackToNonStreaming)
+            var validation = await requestValidator.ValidateAsync(request, cancellationToken);
+            if (!validation.IsValid)
             {
                 audit.Decision = "DENY";
-                audit.DenyReason = "Streaming responses are not implemented by this gateway.";
-                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status400BadRequest, audit.DenyReason);
+                audit.DenyReason = validation.Message;
+                metrics.RecordPolicyDenial(validation.Code ?? "validation_error", request.Model ?? string.Empty);
+                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status400BadRequest, validation.Message ?? "Invalid request.", validation.Code);
             }
+
+            promptText = string.Join("\n", request.Messages.Select(m => m.GetTextContent()));
+            audit.PromptCharacters = promptText.Length;
 
             var logRedaction = options.Value.Redaction.RedactBeforeLogging ? redactor.Redact(promptText) : new RedactionResult(promptText, 0);
             audit.RedactionCount = logRedaction.RedactionCount;
@@ -230,10 +253,12 @@ app.MapPost("/v1/chat/completions", async (
             audit.SupportsConverse = decision.Model?.SupportsConverse;
             audit.StreamingSupported = decision.Model?.ResponseStreamingSupported;
             audit.PolicyDecision = decision.Reason;
+            audit.PolicyRuleId = decision.RuleId;
 
             if (!decision.Allowed || decision.Model is null)
             {
-                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status403Forbidden, decision.Reason);
+                metrics.RecordPolicyDenial(decision.RuleId, request.Model ?? string.Empty);
+                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status403Forbidden, decision.Reason, decision.RuleId);
             }
 
             var orderedStrategies = strategies.OrderBy(s => s is BedrockConverseInvocationStrategy ? 0 : 1).ToArray();
@@ -246,7 +271,10 @@ app.MapPost("/v1/chat/completions", async (
             }
 
             audit.InvocationStrategy = strategy.Name;
+            metrics.RecordRequest(request.Model ?? string.Empty);
+            var bedrockStopwatch = Stopwatch.StartNew();
             var response = await strategy.InvokeAsync(decision.Model, request, requestContext, cancellationToken);
+            metrics.RecordBedrockInvocation(strategy.Name, bedrockStopwatch.Elapsed, success: true);
             response.Model = decision.Model.Id;
 
             if (options.Value.Redaction.Enabled)
@@ -263,8 +291,10 @@ app.MapPost("/v1/chat/completions", async (
             audit.OutputTokens = response.Usage?.CompletionTokens;
             audit.TotalTokens = response.Usage?.TotalTokens;
             audit.TokenEstimate = response.Usage?.TotalTokens ?? EstimateTokens(promptText);
+            metrics.RecordTokenUsage(request.Model ?? string.Empty, audit.InputTokens ?? 0, audit.OutputTokens ?? 0);
             audit.LatencyMs = stopwatch.ElapsedMilliseconds;
             auditLogger.Write(audit);
+            metrics.RecordLatency(request.Model ?? string.Empty, stopwatch.Elapsed);
             return Results.Json(response);
         }
         catch (NotSupportedException ex)
@@ -279,6 +309,8 @@ app.MapPost("/v1/chat/completions", async (
             audit.DenyReason = ex.Message;
             audit.LatencyMs = stopwatch.ElapsedMilliseconds;
             auditLogger.Write(audit);
+            metrics.RecordBedrockError(request.Model ?? string.Empty);
+            metrics.RecordServerError("chat_completions");
             return Results.Json(OpenAiErrorResponse.Create("Bedrock invocation failed.", "server_error", "bedrock_error"), statusCode: StatusCodes.Status502BadGateway);
         }
     })
