@@ -17,6 +17,11 @@ public sealed class GatewayAuditEvent
     public string RequestedModelAlias { get; set; } = string.Empty;
     public string? ResolvedBedrockModelId { get; set; }
     public string Provider { get; set; } = "aws-bedrock";
+    public string? InvocationStrategy { get; set; }
+    public bool? SupportsConverse { get; set; }
+    public bool? StreamingSupported { get; set; }
+    public string? PolicyDecision { get; set; }
+    public int? TokenEstimate { get; set; }
     public string Region { get; set; } = string.Empty;
     public int PromptCharacters { get; set; }
     public int RedactionCount { get; set; }

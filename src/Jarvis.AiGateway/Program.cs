@@ -1,8 +1,7 @@
 using System.Diagnostics;
 using System.Security.Claims;
-using System.Text.Json;
-using System.Threading.RateLimiting;
 using Amazon;
+using Amazon.Bedrock;
 using Amazon.BedrockRuntime;
 using Jarvis.AiGateway.Middleware;
 using Jarvis.AiGateway.Models;
@@ -13,6 +12,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,6 +25,7 @@ builder.Logging.AddJsonConsole(options =>
 });
 
 builder.Services.Configure<GatewayOptions>(builder.Configuration.GetSection("Gateway"));
+builder.Services.AddSingleton<IValidateOptions<GatewayOptions>, GatewayOptionsValidator>();
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 
 var gatewayOptions = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
@@ -50,8 +51,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             options.TokenValidationParameters.ValidIssuer = jwtOptions.ValidIssuer;
         }
 
-        // This allows Open WebUI or an identity-aware reverse proxy to pass the user's IdP token
-        // in X-Jarvis-User-Token while using X-Jarvis-Gateway-Key for service-to-service auth.
         options.Events = new JwtBearerEvents
         {
             OnMessageReceived = context =>
@@ -75,6 +74,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddAuthorization();
+builder.Services.AddMemoryCache();
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -96,6 +96,23 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 
+builder.Services.AddSingleton<IAmazonBedrock>(_ =>
+{
+    var region = RegionEndpoint.GetBySystemName(gatewayOptions.AwsRegion);
+    var config = new AmazonBedrockConfig
+    {
+        RegionEndpoint = region,
+        AuthenticationRegion = gatewayOptions.AwsRegion
+    };
+
+    if (!string.IsNullOrWhiteSpace(gatewayOptions.BedrockEndpointDns))
+    {
+        config.ServiceURL = NormalizeEndpoint(gatewayOptions.BedrockEndpointDns);
+    }
+
+    return new AmazonBedrockClient(config);
+});
+
 builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ =>
 {
     var region = RegionEndpoint.GetBySystemName(gatewayOptions.AwsRegion);
@@ -107,10 +124,7 @@ builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ =>
 
     if (!string.IsNullOrWhiteSpace(gatewayOptions.BedrockRuntimeEndpointDns))
     {
-        var endpoint = gatewayOptions.BedrockRuntimeEndpointDns.StartsWith("http", StringComparison.OrdinalIgnoreCase)
-            ? gatewayOptions.BedrockRuntimeEndpointDns
-            : $"https://{gatewayOptions.BedrockRuntimeEndpointDns}";
-        config.ServiceURL = endpoint;
+        config.ServiceURL = NormalizeEndpoint(gatewayOptions.BedrockRuntimeEndpointDns);
     }
 
     return new AmazonBedrockRuntimeClient(config);
@@ -119,8 +133,14 @@ builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ =>
 builder.Services.AddSingleton<IUserContextFactory, UserContextFactory>();
 builder.Services.AddSingleton<IRequestContextFactory, RequestContextFactory>();
 builder.Services.AddSingleton<IContentRedactor, RegexContentRedactor>();
+builder.Services.AddSingleton<IBedrockModelDiscoveryService, BedrockModelDiscoveryService>();
+builder.Services.AddSingleton<IInvokeModelPayloadAdapter, AmazonTitanTextInvokeModelPayloadAdapter>();
+builder.Services.AddSingleton<IInvokeModelPayloadAdapter, MetaLlamaInvokeModelPayloadAdapter>();
+builder.Services.AddSingleton<IInvokeModelPayloadAdapter, MistralInvokeModelPayloadAdapter>();
+builder.Services.AddSingleton<IModelRegistry, ModelRegistry>();
 builder.Services.AddSingleton<IPolicyEngine, PolicyEngine>();
-builder.Services.AddSingleton<IBedrockChatClient, BedrockConverseChatClient>();
+builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockConverseInvocationStrategy>();
+builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockInvokeModelTextInvocationStrategy>();
 builder.Services.AddSingleton<IAuditLogger, AuditLogger>();
 
 var app = builder.Build();
@@ -139,16 +159,18 @@ app.MapGet("/healthz", () => Results.Ok(new
     timeUtc = DateTimeOffset.UtcNow
 }));
 
-app.MapGet("/v1/models", (
+app.MapGet("/v1/models", async (
         ClaimsPrincipal principal,
         IUserContextFactory userContextFactory,
-        IPolicyEngine policyEngine) =>
+        IPolicyEngine policyEngine,
+        CancellationToken cancellationToken) =>
     {
         var user = userContextFactory.Create(principal);
+        var visibleModels = await policyEngine.GetVisibleModelsAsync(user, cancellationToken);
         var response = new OpenAiModelListResponse
         {
-            Data = policyEngine.GetVisibleModels(user)
-                .Select(m => new OpenAiModelInfo { Id = m.Alias, OwnedBy = "jarvis-ai-gateway" })
+            Data = visibleModels
+                .Select(m => new OpenAiModelInfo { Id = m.Id, OwnedBy = "aws-bedrock" })
                 .ToList()
         };
 
@@ -162,7 +184,7 @@ app.MapPost("/v1/chat/completions", async (
         IUserContextFactory userContextFactory,
         IRequestContextFactory requestContextFactory,
         IPolicyEngine policyEngine,
-        IBedrockChatClient bedrockClient,
+        IEnumerable<IBedrockInvocationStrategy> strategies,
         IContentRedactor redactor,
         IAuditLogger auditLogger,
         IOptions<GatewayOptions> options,
@@ -184,102 +206,80 @@ app.MapPost("/v1/chat/completions", async (
             ItarMode = requestContext.ItarMode,
             RequestedModelAlias = request.Model,
             Region = options.Value.AwsRegion,
-            EndpointMode = string.IsNullOrWhiteSpace(options.Value.BedrockRuntimeEndpointDns)
-                ? "regional-dns"
-                : "vpce-override",
+            EndpointMode = string.IsNullOrWhiteSpace(options.Value.BedrockRuntimeEndpointDns) ? "regional-dns" : "vpce-override",
             PromptCharacters = promptText.Length
         };
 
-        var logRedaction = options.Value.Redaction.RedactBeforeLogging
-            ? redactor.Redact(promptText)
-            : new RedactionResult(promptText, 0);
-        audit.RedactionCount = logRedaction.RedactionCount;
-
-        var decision = policyEngine.Authorize(user, requestContext, request);
-        audit.Decision = decision.Allowed ? "ALLOW" : "DENY";
-        audit.DenyReason = decision.Allowed ? null : decision.Reason;
-        audit.ResolvedBedrockModelId = decision.Model?.BedrockModelId;
-
-        if (!decision.Allowed || decision.Model is null)
-        {
-            stopwatch.Stop();
-            audit.LatencyMs = stopwatch.ElapsedMilliseconds;
-            auditLogger.Write(audit);
-            httpContext.Response.StatusCode = StatusCodes.Status403Forbidden;
-            await httpContext.Response.WriteAsJsonAsync(
-                OpenAiErrorResponse.Create(decision.Reason, "policy_denied", "policy_denied"),
-                cancellationToken);
-            return;
-        }
-
         try
         {
-            var bedrockResult = await bedrockClient.CompleteAsync(request, decision.Model, requestContext, cancellationToken);
-            stopwatch.Stop();
-
-            audit.InputTokens = bedrockResult.InputTokens;
-            audit.OutputTokens = bedrockResult.OutputTokens;
-            audit.TotalTokens = bedrockResult.TotalTokens;
-            audit.LatencyMs = stopwatch.ElapsedMilliseconds;
-            auditLogger.Write(audit);
-
-            if (request.Stream)
+            if (request.Stream && !options.Value.Streaming.FallbackToNonStreaming)
             {
-                await WriteOpenAiCompatibleStreamAsync(httpContext, request.Model, bedrockResult.Text, bedrockResult.StopReason, cancellationToken);
-                return;
+                audit.Decision = "DENY";
+                audit.DenyReason = "Streaming responses are not implemented by this gateway.";
+                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status400BadRequest, audit.DenyReason);
             }
 
-            var response = new OpenAiChatCompletionResponse
-            {
-                Model = request.Model,
-                Choices =
-                [
-                    new OpenAiChoice
-                    {
-                        Index = 0,
-                        Message = new OpenAiAssistantMessage
-                        {
-                            Role = "assistant",
-                            Content = bedrockResult.Text
-                        },
-                        FinishReason = NormalizeFinishReason(bedrockResult.StopReason)
-                    }
-                ],
-                Usage = new OpenAiUsage
-                {
-                    PromptTokens = bedrockResult.InputTokens,
-                    CompletionTokens = bedrockResult.OutputTokens,
-                    TotalTokens = bedrockResult.TotalTokens
-                }
-            };
+            var logRedaction = options.Value.Redaction.RedactBeforeLogging ? redactor.Redact(promptText) : new RedactionResult(promptText, 0);
+            audit.RedactionCount = logRedaction.RedactionCount;
 
-            await httpContext.Response.WriteAsJsonAsync(response, cancellationToken);
-        }
-        catch (AmazonBedrockRuntimeException ex)
-        {
-            stopwatch.Stop();
-            audit.Decision = "ERROR";
-            audit.DenyReason = $"Bedrock error: {ex.ErrorCode}";
+            var decision = await policyEngine.AuthorizeAsync(user, requestContext, request, cancellationToken);
+            audit.Decision = decision.Allowed ? "ALLOW" : "DENY";
+            audit.DenyReason = decision.Allowed ? null : decision.Reason;
+            audit.ResolvedBedrockModelId = decision.Model?.BedrockModelId;
+            audit.Provider = decision.Model?.ProviderName ?? "aws-bedrock";
+            audit.SupportsConverse = decision.Model?.SupportsConverse;
+            audit.StreamingSupported = decision.Model?.ResponseStreamingSupported;
+            audit.PolicyDecision = decision.Reason;
+
+            if (!decision.Allowed || decision.Model is null)
+            {
+                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status403Forbidden, decision.Reason);
+            }
+
+            var orderedStrategies = strategies.OrderBy(s => s is BedrockConverseInvocationStrategy ? 0 : 1).ToArray();
+            var strategy = orderedStrategies.FirstOrDefault(s => s.CanHandle(decision.Model, request));
+            if (strategy is null)
+            {
+                audit.Decision = "DENY";
+                audit.DenyReason = BedrockInvokeModelTextInvocationStrategy.UnsupportedAdapterMessage;
+                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status501NotImplemented, audit.DenyReason, "unsupported_model");
+            }
+
+            audit.InvocationStrategy = strategy.Name;
+            var response = await strategy.InvokeAsync(decision.Model, request, requestContext, cancellationToken);
+            response.Model = decision.Model.Id;
+
+            if (options.Value.Redaction.Enabled)
+            {
+                foreach (var choice in response.Choices)
+                {
+                    var redacted = redactor.Redact(choice.Message.Content);
+                    choice.Message.Content = redacted.Text;
+                    audit.RedactionCount += redacted.RedactionCount;
+                }
+            }
+
+            audit.InputTokens = response.Usage?.PromptTokens;
+            audit.OutputTokens = response.Usage?.CompletionTokens;
+            audit.TotalTokens = response.Usage?.TotalTokens;
+            audit.TokenEstimate = response.Usage?.TotalTokens ?? EstimateTokens(promptText);
             audit.LatencyMs = stopwatch.ElapsedMilliseconds;
             auditLogger.Write(audit);
-
-            httpContext.Response.StatusCode = StatusCodes.Status502BadGateway;
-            await httpContext.Response.WriteAsJsonAsync(
-                OpenAiErrorResponse.Create("Bedrock invocation failed. See gateway logs for the correlation ID.", "bedrock_error", ex.ErrorCode),
-                cancellationToken);
+            return Results.Json(response);
+        }
+        catch (NotSupportedException ex)
+        {
+            audit.Decision = "DENY";
+            audit.DenyReason = ex.Message;
+            return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status501NotImplemented, ex.Message, "unsupported_model");
         }
         catch (Exception ex)
         {
-            stopwatch.Stop();
             audit.Decision = "ERROR";
-            audit.DenyReason = ex.GetType().Name;
+            audit.DenyReason = ex.Message;
             audit.LatencyMs = stopwatch.ElapsedMilliseconds;
             auditLogger.Write(audit);
-
-            httpContext.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            await httpContext.Response.WriteAsJsonAsync(
-                OpenAiErrorResponse.Create("Gateway request failed. See gateway logs for the correlation ID.", "gateway_error", ex.GetType().Name),
-                cancellationToken);
+            return Results.Json(OpenAiErrorResponse.Create("Bedrock invocation failed.", "server_error", "bedrock_error"), statusCode: StatusCodes.Status502BadGateway);
         }
     })
     .RequireAuthorization()
@@ -287,76 +287,13 @@ app.MapPost("/v1/chat/completions", async (
 
 app.Run();
 
-static string NormalizeFinishReason(string? bedrockStopReason)
+static string NormalizeEndpoint(string endpoint) => endpoint.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? endpoint : $"https://{endpoint}";
+
+static int EstimateTokens(string text) => Math.Max(1, text.Length / 4);
+
+static IResult WriteDenied(IAuditLogger auditLogger, GatewayAuditEvent audit, Stopwatch stopwatch, int statusCode, string message, string? code = null)
 {
-    if (string.IsNullOrWhiteSpace(bedrockStopReason)) return "stop";
-    if (bedrockStopReason.Contains("max", StringComparison.OrdinalIgnoreCase)) return "length";
-    if (bedrockStopReason.Contains("tool", StringComparison.OrdinalIgnoreCase)) return "tool_calls";
-    return "stop";
-}
-
-static async Task WriteOpenAiCompatibleStreamAsync(
-    HttpContext context,
-    string model,
-    string text,
-    string stopReason,
-    CancellationToken cancellationToken)
-{
-    context.Response.StatusCode = StatusCodes.Status200OK;
-    context.Response.ContentType = "text/event-stream";
-    context.Response.Headers.CacheControl = "no-cache";
-    context.Response.Headers.Connection = "keep-alive";
-
-    var id = $"chatcmpl-{Guid.NewGuid():N}";
-    var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-    var roleChunk = new
-    {
-        id,
-        @object = "chat.completion.chunk",
-        created,
-        model,
-        choices = new[]
-        {
-            new { index = 0, delta = new { role = "assistant" }, finish_reason = (string?)null }
-        }
-    };
-
-    await WriteSseDataAsync(context, roleChunk, cancellationToken);
-
-    var contentChunk = new
-    {
-        id,
-        @object = "chat.completion.chunk",
-        created,
-        model,
-        choices = new[]
-        {
-            new { index = 0, delta = new { content = text }, finish_reason = (string?)null }
-        }
-    };
-
-    await WriteSseDataAsync(context, contentChunk, cancellationToken);
-
-    var doneChunk = new
-    {
-        id,
-        @object = "chat.completion.chunk",
-        created,
-        model,
-        choices = new[]
-        {
-            new { index = 0, delta = new { }, finish_reason = NormalizeFinishReason(stopReason) }
-        }
-    };
-
-    await WriteSseDataAsync(context, doneChunk, cancellationToken);
-    await context.Response.WriteAsync("data: [DONE]\n\n", cancellationToken);
-}
-
-static async Task WriteSseDataAsync(HttpContext context, object payload, CancellationToken cancellationToken)
-{
-    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-    await context.Response.WriteAsync($"data: {json}\n\n", cancellationToken);
-    await context.Response.Body.FlushAsync(cancellationToken);
+    audit.LatencyMs = stopwatch.ElapsedMilliseconds;
+    auditLogger.Write(audit);
+    return Results.Json(OpenAiErrorResponse.Create(message, code: code), statusCode: statusCode);
 }

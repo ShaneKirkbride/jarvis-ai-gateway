@@ -7,35 +7,41 @@ namespace Jarvis.AiGateway.Services;
 
 public interface IPolicyEngine
 {
-    PolicyDecision Authorize(UserContext user, RequestContext context, OpenAiChatCompletionRequest request);
-    IReadOnlyList<ModelRouteOptions> GetVisibleModels(UserContext user);
+    Task<PolicyDecision> AuthorizeAsync(UserContext user, RequestContext context, OpenAiChatCompletionRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<GatewayModel>> GetVisibleModelsAsync(UserContext user, CancellationToken cancellationToken);
 }
 
-public sealed class PolicyEngine(IOptions<GatewayOptions> options) : IPolicyEngine
+public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistry modelRegistry) : IPolicyEngine
 {
     private readonly GatewayOptions _options = options.Value;
 
-    public IReadOnlyList<ModelRouteOptions> GetVisibleModels(UserContext user)
+    public async Task<IReadOnlyList<GatewayModel>> GetVisibleModelsAsync(UserContext user, CancellationToken cancellationToken)
     {
-        return _options.Models
-            .Where(m => m.Enabled)
-            .Where(m => IsUserInAllowedGroup(user, m))
-            .ToList();
+        var models = await modelRegistry.GetChatModelsAsync(cancellationToken);
+        return models.Where(m => IsUserInAllowedGroup(user, m)).ToList();
     }
 
-    public PolicyDecision Authorize(UserContext user, RequestContext context, OpenAiChatCompletionRequest request)
+    public async Task<PolicyDecision> AuthorizeAsync(UserContext user, RequestContext context, OpenAiChatCompletionRequest request, CancellationToken cancellationToken)
     {
-        var model = _options.Models.FirstOrDefault(m =>
-            m.Enabled && string.Equals(m.Alias, request.Model, StringComparison.OrdinalIgnoreCase));
-
+        var model = await modelRegistry.FindChatModelAsync(request.Model, cancellationToken);
         if (model is null)
         {
-            return new PolicyDecision(false, $"Model alias '{request.Model}' is not enabled or is not configured.", null);
+            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled, not allowed by policy, or not supported for chat.", null);
         }
 
         if (string.IsNullOrWhiteSpace(model.BedrockModelId) || model.BedrockModelId.StartsWith("REPLACE_WITH", StringComparison.OrdinalIgnoreCase))
         {
             return new PolicyDecision(false, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.", model);
+        }
+
+        if (!model.Enabled)
+        {
+            return new PolicyDecision(false, "Model is disabled.", model);
+        }
+
+        if (!model.HasTextOutput)
+        {
+            return new PolicyDecision(false, "Model does not advertise TEXT output and cannot be used for /v1/chat/completions.", model);
         }
 
         if (!IsUserInAllowedGroup(user, model))
@@ -62,7 +68,7 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options) : IPolicyEngi
         {
             if (!model.ItarApproved)
             {
-                return new PolicyDecision(false, "ITAR-labeled request attempted to use a non-ITAR-approved model alias.", model);
+                return new PolicyDecision(false, "ITAR-labeled request attempted to use a non-ITAR-approved model.", model);
             }
 
             if (_options.RequireItarWorkspaceForItarRequests &&
@@ -75,9 +81,9 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options) : IPolicyEngi
         return new PolicyDecision(true, "ALLOW", model);
     }
 
-    private static bool IsUserInAllowedGroup(UserContext user, ModelRouteOptions model)
+    private static bool IsUserInAllowedGroup(UserContext user, GatewayModel model)
     {
-        if (model.AllowedGroups.Count == 0) return true;
-        return model.AllowedGroups.Any(g => user.Groups.Contains(g));
+        if (model.RequiredGroups.Count == 0) return true;
+        return model.RequiredGroups.Any(g => user.Groups.Contains(g));
     }
 }
