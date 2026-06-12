@@ -61,14 +61,13 @@ public sealed class OpenAiMessage
                     return false;
                 }
 
-                if (item.TryGetProperty("type", out var typeElement))
+                if (!item.TryGetProperty("type", out var typeElement) ||
+                    typeElement.ValueKind != JsonValueKind.String ||
+                    (!string.Equals(typeElement.GetString(), "text", StringComparison.OrdinalIgnoreCase) &&
+                     !string.Equals(typeElement.GetString(), "input_text", StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (typeElement.ValueKind != JsonValueKind.String ||
-                        !string.Equals(typeElement.GetString(), "text", StringComparison.OrdinalIgnoreCase))
-                    {
-                        error = $"unsupported content part type at index {index}; only text content is supported.";
-                        return false;
-                    }
+                    error = $"unsupported content part type at index {index}; only text content is supported.";
+                    return false;
                 }
 
                 if (item.TryGetProperty("text", out var textElement) && textElement.ValueKind == JsonValueKind.String)
@@ -91,7 +90,8 @@ public sealed class OpenAiMessage
         if (Content.ValueKind == JsonValueKind.Object &&
             Content.TryGetProperty("type", out var objectType) &&
             objectType.ValueKind == JsonValueKind.String &&
-            string.Equals(objectType.GetString(), "text", StringComparison.OrdinalIgnoreCase) &&
+            (string.Equals(objectType.GetString(), "text", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(objectType.GetString(), "input_text", StringComparison.OrdinalIgnoreCase)) &&
             Content.TryGetProperty("text", out var objectText) &&
             objectText.ValueKind == JsonValueKind.String)
         {

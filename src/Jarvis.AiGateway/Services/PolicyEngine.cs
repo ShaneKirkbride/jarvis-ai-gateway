@@ -1,7 +1,7 @@
+using System.Text.RegularExpressions;
 using Jarvis.AiGateway.Models;
 using Jarvis.AiGateway.Options;
 using Microsoft.Extensions.Options;
-using System.Text.RegularExpressions;
 
 namespace Jarvis.AiGateway.Services;
 
@@ -17,9 +17,33 @@ public interface IPolicyRule
     PolicyRuleResult Evaluate(PolicyEvaluationContext context);
 }
 
-public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistry modelRegistry, IEnumerable<IPolicyRule>? rules = null) : IPolicyEngine
+public sealed class PolicyEngine : IPolicyEngine
 {
-    private readonly IReadOnlyList<IPolicyRule> _rules = (rules ?? DefaultRules(options.Value)).ToArray();
+    private readonly IModelRegistry modelRegistry;
+    private readonly IReadOnlyList<IPolicyRule> _rules;
+
+    public PolicyEngine(IModelRegistry modelRegistry, IEnumerable<IPolicyRule> rules)
+    {
+        this.modelRegistry = modelRegistry;
+        _rules = rules.ToArray();
+    }
+
+    public PolicyEngine(IOptions<GatewayOptions> options, IModelRegistry modelRegistry)
+        : this(modelRegistry, DefaultRules(options))
+    {
+    }
+
+    private static IReadOnlyList<IPolicyRule> DefaultRules(IOptions<GatewayOptions> options) =>
+    [
+        new ModelConfiguredRule(),
+        new ModelEnabledRule(),
+        new ModelTextOutputRule(),
+        new GroupAuthorizationRule(),
+        new PromptSizeRule(),
+        new BlockedPatternRule(options),
+        new ItarModelRule(),
+        new ItarWorkspaceRule(options)
+    ];
 
     public async Task<IReadOnlyList<GatewayModel>> GetVisibleModelsAsync(UserContext user, CancellationToken cancellationToken)
     {
@@ -38,34 +62,43 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistr
         var evaluationContext = new PolicyEvaluationContext(user, context, request, model);
         foreach (var rule in _rules)
         {
-            return new PolicyDecision(false, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.", model, PolicyRuleIds.ModelPlaceholderId);
+            var result = rule.Evaluate(evaluationContext);
+            if (!result.Allowed)
+            {
+                return new PolicyDecision(false, result.Reason, model, result.RuleId);
+            }
         }
 
-        if (!model.Enabled)
+        return new PolicyDecision(true, "ALLOW", model, PolicyRuleIds.Allow);
+    }
+
+    internal static bool IsUserInAllowedGroup(UserContext user, GatewayModel model)
+    {
+        return model.RequiredGroups.Count == 0 || model.RequiredGroups.Any(g => user.Groups.Contains(g));
+    }
+}
+
+public sealed class ModelConfiguredRule : IPolicyRule
+{
+    public string RuleId => PolicyRuleIds.ModelPlaceholderId;
+
+    public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
+    {
+        var modelId = context.Model.BedrockModelId;
+        if (string.IsNullOrWhiteSpace(modelId) || GatewayOptionsValidator.LooksLikePlaceholder(modelId))
         {
-            return new PolicyDecision(false, "Model is disabled.", model, PolicyRuleIds.ModelDisabled);
+            return PolicyRuleResult.Deny(RuleId, $"Model alias '{context.Model.Alias}' does not have a real Bedrock model ID configured.");
         }
 
-        if (!model.HasTextOutput)
-        {
-            return new PolicyDecision(false, "Model does not advertise TEXT output and cannot be used for /v1/chat/completions.", model, PolicyRuleIds.ModelNoTextOutput);
-        }
-
-        if (!IsUserInAllowedGroup(user, model))
-        {
-            return new PolicyDecision(false, "User is not in an approved group for the requested model.", model, PolicyRuleIds.UserGroupDenied);
-        }
-
-        var allPromptText = string.Join("\n", request.Messages.Select(m => m.GetTextContent()));
-        if (allPromptText.Length > model.MaxInputCharacters)
-        {
-            return new PolicyDecision(false, $"Prompt exceeds configured maximum input size for model alias '{model.Alias}'.", model, PolicyRuleIds.PromptTooLarge);
-        }
+        return PolicyRuleResult.Allow(RuleId);
+    }
+}
 
 public sealed class ModelEnabledRule : IPolicyRule
 {
     public string RuleId => PolicyRuleIds.ModelDisabled;
-    public PolicyRuleResult Evaluate(PolicyEvaluationContext context) => context.Model!.Enabled
+
+    public PolicyRuleResult Evaluate(PolicyEvaluationContext context) => context.Model.Enabled
         ? PolicyRuleResult.Allow(RuleId)
         : PolicyRuleResult.Deny(RuleId, "Model is disabled.");
 }
@@ -73,7 +106,8 @@ public sealed class ModelEnabledRule : IPolicyRule
 public sealed class ModelTextOutputRule : IPolicyRule
 {
     public string RuleId => PolicyRuleIds.ModelNoTextOutput;
-    public PolicyRuleResult Evaluate(PolicyEvaluationContext context) => context.Model!.HasTextOutput
+
+    public PolicyRuleResult Evaluate(PolicyEvaluationContext context) => context.Model.HasTextOutput
         ? PolicyRuleResult.Allow(RuleId)
         : PolicyRuleResult.Deny(RuleId, "Model does not advertise TEXT output and cannot be used for /v1/chat/completions.");
 }
@@ -81,7 +115,8 @@ public sealed class ModelTextOutputRule : IPolicyRule
 public sealed class GroupAuthorizationRule : IPolicyRule
 {
     public string RuleId => PolicyRuleIds.UserGroupDenied;
-    public PolicyRuleResult Evaluate(PolicyEvaluationContext context) => PolicyEngine.IsUserInAllowedGroup(context.User, context.Model!)
+
+    public PolicyRuleResult Evaluate(PolicyEvaluationContext context) => PolicyEngine.IsUserInAllowedGroup(context.User, context.Model)
         ? PolicyRuleResult.Allow(RuleId)
         : PolicyRuleResult.Deny(RuleId, "User is not in an approved group for the requested model.");
 }
@@ -89,10 +124,11 @@ public sealed class GroupAuthorizationRule : IPolicyRule
 public sealed class PromptSizeRule : IPolicyRule
 {
     public string RuleId => PolicyRuleIds.PromptTooLarge;
+
     public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
     {
         var prompt = string.Join("\n", context.Request.Messages.Select(m => m.Content));
-        return prompt.Length > context.Model!.MaxInputCharacters
+        return prompt.Length > context.Model.MaxInputCharacters
             ? PolicyRuleResult.Deny(RuleId, $"Prompt exceeds configured maximum input size for model alias '{context.Model.Alias}'.")
             : PolicyRuleResult.Allow(RuleId);
     }
@@ -110,25 +146,24 @@ public sealed class BlockedPatternRule(IOptions<GatewayOptions> gatewayOptions) 
             if (string.IsNullOrWhiteSpace(pattern)) continue;
             if (GatewayRegex.IsMatch(prompt, pattern, gatewayOptions.Value, RegexOptions.IgnoreCase))
             {
-                return new PolicyDecision(false, "Prompt matched a blocked policy pattern.", model, PolicyRuleIds.PromptBlockedPattern);
+                return PolicyRuleResult.Deny(RuleId, "Prompt matched a blocked policy pattern.");
             }
         }
 
-        if (context.ItarMode || DataLabelClassifier.IsItar(context.DataLabel))
-        {
-            if (!model.ItarApproved)
-            {
-                return new PolicyDecision(false, "ITAR-labeled request attempted to use a non-ITAR-approved model.", model, PolicyRuleIds.ItarModelDenied);
-            }
+        return PolicyRuleResult.Allow(RuleId);
+    }
+}
 
-            if (_options.RequireItarWorkspaceForItarRequests &&
-                !_options.ItarApprovedWorkspaceIds.Contains(context.WorkspaceId, StringComparer.OrdinalIgnoreCase))
-            {
-                return new PolicyDecision(false, "ITAR-labeled request did not originate from an approved ITAR workspace.", model, PolicyRuleIds.ItarWorkspaceDenied);
-            }
-        }
+public sealed class ItarModelRule : IPolicyRule
+{
+    public string RuleId => PolicyRuleIds.ItarModelDenied;
 
-        return new PolicyDecision(true, "ALLOW", model, PolicyRuleIds.Allow);
+    public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
+    {
+        if (!IsItar(context)) return PolicyRuleResult.Allow(RuleId);
+        return context.Model.ItarApproved
+            ? PolicyRuleResult.Allow(RuleId)
+            : PolicyRuleResult.Deny(RuleId, "ITAR-labeled request attempted to use a non-ITAR-approved model.");
     }
 
     internal static bool IsItar(PolicyEvaluationContext context) => context.RequestContext.ItarMode || DataLabelClassifier.IsItar(context.RequestContext.DataLabel);
@@ -137,6 +172,7 @@ public sealed class BlockedPatternRule(IOptions<GatewayOptions> gatewayOptions) 
 public sealed class ItarWorkspaceRule(IOptions<GatewayOptions> gatewayOptions) : IPolicyRule
 {
     public string RuleId => PolicyRuleIds.ItarWorkspaceDenied;
+
     public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
     {
         if (!ItarModelRule.IsItar(context) || !gatewayOptions.Value.RequireItarWorkspaceForItarRequests) return PolicyRuleResult.Allow(RuleId);

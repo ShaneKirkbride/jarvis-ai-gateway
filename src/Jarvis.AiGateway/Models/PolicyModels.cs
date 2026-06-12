@@ -18,7 +18,7 @@ public sealed record PolicyEvaluationContext(
     UserContext User,
     RequestContext RequestContext,
     AiChatRequest Request,
-    GatewayModel? Model);
+    GatewayModel Model);
 
 public sealed record PolicyRuleResult(bool Allowed, string RuleId, string Reason)
 {
@@ -26,7 +26,10 @@ public sealed record PolicyRuleResult(bool Allowed, string RuleId, string Reason
     public static PolicyRuleResult Deny(string ruleId, string reason) => new(false, ruleId, reason);
 }
 
-public sealed partial record PolicyDecision(bool Allowed, string Reason, GatewayModel? Model)
+public sealed record PolicyDecision(bool Allowed, string Reason, GatewayModel? Model, string RuleId)
 {
-    public string RuleId { get; init; } = Allowed ? PolicyRuleIds.Allow : PolicyRuleIds.ModelNotFound;
+    public PolicyDecision(bool allowed, string reason, GatewayModel? model)
+        : this(allowed, reason, model, allowed ? PolicyRuleIds.Allow : PolicyRuleIds.ModelNotFound)
+    {
+    }
 }
