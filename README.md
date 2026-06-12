@@ -38,16 +38,16 @@ This is a production-shaped starter, not a fully certified product. Before produ
 
 Implemented:
 
-- Dynamic Bedrock model discovery through `ListFoundationModels`.
+- Explicit Bedrock model aliases by default. Optional Bedrock model discovery through `ListFoundationModels` is supported but disabled in production examples.
 - Policy-gated OpenAI-compatible model listing for chat/text models.
 - Non-streaming Bedrock Converse calls.
 - Conservative provider-specific `InvokeModel` fallback adapters for known text model families.
 - OpenAI-compatible non-streaming response.
-- Configurable `stream=true` fallback to non-streaming until true Bedrock token streaming is implemented.
+- `stream=true` is rejected by default with HTTP 400 until true Bedrock ConverseStream token streaming is implemented.
 
 Recommended next hardening:
 
-- Replace one-chunk streaming with Bedrock `ConverseStream`.
+- Implement Bedrock `ConverseStream` before enabling streaming in Open WebUI.
 - Replace regex-only redaction with enterprise DLP/classification service calls.
 - Add mTLS between Open WebUI and the gateway.
 - Add persistent policy configuration backed by a controlled config source.
@@ -67,6 +67,8 @@ Jwt__Authority=https://login.microsoftonline.us/<tenant-id>/v2.0
 Jwt__Audience=api://jarvis-ai-gateway
 Gateway__RequireServiceApiKey=true
 Gateway__ServiceApiKey=<from Secrets Manager>
+Gateway__ModelDiscovery__Enabled=false
+Gateway__Streaming__FallbackToNonStreaming=false
 ```
 
 
@@ -134,6 +136,18 @@ dotnet publish src/Jarvis.AiGateway/Jarvis.AiGateway.csproj -c Release --os linu
 
 For local calls to Bedrock, use your normal AWS credential chain. For ECS deployment, do not bake credentials into the image. Use the ECS task role.
 
+## Readiness
+
+`/healthz` is a lightweight liveness endpoint. `/readyz` validates non-secret runtime readiness, including AWS region, JWT authority/audience, service-key requirements, enabled aliases, and production placeholder model IDs. The ECS example omits a container `curl` health check; prefer internal ALB target health checks against `/healthz` and deployment smoke checks against `/readyz`.
+
+## Model discovery tradeoff
+
+Production examples disable Bedrock model discovery and rely on explicit aliases. This avoids granting `bedrock:ListFoundationModels` and keeps model exposure deterministic. If discovery is deliberately enabled, add the IAM permission, keep raw Bedrock IDs hidden unless approved, and document why discovery is needed.
+
+## Streaming behavior
+
+Open WebUI should send `stream: false`. The gateway rejects `stream=true` by default because returning one full response chunk is not true token streaming. Enable streaming only after implementing and testing Bedrock ConverseStream.
+
 ## Smoke tests
 
 Health check:
@@ -174,7 +188,7 @@ curl -s http://localhost:8080/v1/chat/completions \
   -d '{
     "model":"jarvis-govcloud-general",
     "messages":[{"role":"user","content":"Write one secure architecture sentence."}],
-    "stream": true
+    "stream": false
   }'
 ```
 

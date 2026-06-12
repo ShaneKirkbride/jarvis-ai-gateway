@@ -32,55 +32,35 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistr
         var model = await modelRegistry.FindChatModelAsync(request.Model, cancellationToken);
         if (model is null)
         {
-            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled, not allowed by policy, or not supported for chat.", null)
-            {
-                RuleId = PolicyRuleIds.ModelNotFound
-            };
+            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled, not allowed by policy, or not supported for chat.", null, PolicyRuleIds.ModelNotFound);
         }
 
         var evaluationContext = new PolicyEvaluationContext(user, context, request, model);
         foreach (var rule in _rules)
         {
-            var result = rule.Evaluate(evaluationContext);
-            if (!result.Allowed)
-            {
-                return new PolicyDecision(false, result.Reason, model) { RuleId = result.RuleId };
-            }
+            return new PolicyDecision(false, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.", model, PolicyRuleIds.ModelPlaceholderId);
         }
 
-        return new PolicyDecision(true, "ALLOW", model) { RuleId = PolicyRuleIds.Allow };
-    }
+        if (!model.Enabled)
+        {
+            return new PolicyDecision(false, "Model is disabled.", model, PolicyRuleIds.ModelDisabled);
+        }
 
-    internal static bool IsUserInAllowedGroup(UserContext user, GatewayModel model)
-    {
-        if (model.RequiredGroups.Count == 0) return true;
-        return model.RequiredGroups.Any(g => user.Groups.Contains(g));
-    }
+        if (!model.HasTextOutput)
+        {
+            return new PolicyDecision(false, "Model does not advertise TEXT output and cannot be used for /v1/chat/completions.", model, PolicyRuleIds.ModelNoTextOutput);
+        }
 
-    private static IReadOnlyList<IPolicyRule> DefaultRules(GatewayOptions options) =>
-    [
-        new ModelConfiguredRule(),
-        new ModelEnabledRule(),
-        new ModelTextOutputRule(),
-        new GroupAuthorizationRule(),
-        new PromptSizeRule(),
-        new BlockedPatternRule(Microsoft.Extensions.Options.Options.Create(options)),
-        new ItarModelRule(),
-        new ItarWorkspaceRule(Microsoft.Extensions.Options.Options.Create(options))
-    ];
-}
+        if (!IsUserInAllowedGroup(user, model))
+        {
+            return new PolicyDecision(false, "User is not in an approved group for the requested model.", model, PolicyRuleIds.UserGroupDenied);
+        }
 
-public sealed class ModelConfiguredRule : IPolicyRule
-{
-    public string RuleId => PolicyRuleIds.ModelPlaceholderId;
-    public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
-    {
-        var model = context.Model!;
-        return string.IsNullOrWhiteSpace(model.BedrockModelId) || model.BedrockModelId.StartsWith("REPLACE_WITH", StringComparison.OrdinalIgnoreCase)
-            ? PolicyRuleResult.Deny(RuleId, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.")
-            : PolicyRuleResult.Allow(RuleId);
-    }
-}
+        var allPromptText = string.Join("\n", request.Messages.Select(m => m.GetTextContent()));
+        if (allPromptText.Length > model.MaxInputCharacters)
+        {
+            return new PolicyDecision(false, $"Prompt exceeds configured maximum input size for model alias '{model.Alias}'.", model, PolicyRuleIds.PromptTooLarge);
+        }
 
 public sealed class ModelEnabledRule : IPolicyRule
 {
@@ -130,23 +110,25 @@ public sealed class BlockedPatternRule(IOptions<GatewayOptions> gatewayOptions) 
             if (string.IsNullOrWhiteSpace(pattern)) continue;
             if (GatewayRegex.IsMatch(prompt, pattern, gatewayOptions.Value, RegexOptions.IgnoreCase))
             {
-                return PolicyRuleResult.Deny(RuleId, "Prompt matched a blocked policy pattern.");
+                return new PolicyDecision(false, "Prompt matched a blocked policy pattern.", model, PolicyRuleIds.PromptBlockedPattern);
             }
         }
 
-        return PolicyRuleResult.Allow(RuleId);
-    }
-}
+        if (context.ItarMode || DataLabelClassifier.IsItar(context.DataLabel))
+        {
+            if (!model.ItarApproved)
+            {
+                return new PolicyDecision(false, "ITAR-labeled request attempted to use a non-ITAR-approved model.", model, PolicyRuleIds.ItarModelDenied);
+            }
 
-public sealed class ItarModelRule : IPolicyRule
-{
-    public string RuleId => PolicyRuleIds.ItarModelDenied;
-    public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
-    {
-        if (!IsItar(context)) return PolicyRuleResult.Allow(RuleId);
-        return context.Model!.ItarApproved
-            ? PolicyRuleResult.Allow(RuleId)
-            : PolicyRuleResult.Deny(RuleId, "ITAR-labeled request attempted to use a non-ITAR-approved model.");
+            if (_options.RequireItarWorkspaceForItarRequests &&
+                !_options.ItarApprovedWorkspaceIds.Contains(context.WorkspaceId, StringComparer.OrdinalIgnoreCase))
+            {
+                return new PolicyDecision(false, "ITAR-labeled request did not originate from an approved ITAR workspace.", model, PolicyRuleIds.ItarWorkspaceDenied);
+            }
+        }
+
+        return new PolicyDecision(true, "ALLOW", model, PolicyRuleIds.Allow);
     }
 
     internal static bool IsItar(PolicyEvaluationContext context) => context.RequestContext.ItarMode || DataLabelClassifier.IsItar(context.RequestContext.DataLabel);

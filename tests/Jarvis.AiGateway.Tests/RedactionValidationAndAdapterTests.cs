@@ -57,6 +57,23 @@ public sealed class RedactionValidationAndAdapterTests
         Assert.Contains(result.Failures!, f => f.Contains("BedrockModelId"));
         Assert.Contains(result.Failures!, f => f.Contains("MaxInputCharacters"));
         Assert.Contains(result.Failures!, f => f.Contains("MaxOutputTokens"));
+
+        var missingSecretResult = new GatewayOptionsValidator().Validate(null, new GatewayOptions { RequireServiceApiKey = true });
+        var productionResult = new GatewayOptionsValidator().Validate(null, new GatewayOptions { EnvironmentName = "Production", RequireServiceApiKey = false });
+        var placeholderSecretResult = new GatewayOptionsValidator().Validate(null, new GatewayOptions { RequireServiceApiKey = true, ServiceApiKey = "REPLACE_WITH_SECRET" });
+        var invalidBoundsResult = new GatewayOptionsValidator().Validate(null, new GatewayOptions { RequestValidation = new RequestValidationOptions { MinimumTemperature = 0.7f, MaximumTemperature = 0.5f, MaxStopSequences = -1, MaxStopSequenceCharacters = 0, MaxMetadataBytes = 0 } });
+
+        Assert.True(missingSecretResult.Failed);
+        Assert.Contains(missingSecretResult.Failures!, f => f.Contains("ServiceApiKey"));
+        Assert.True(productionResult.Failed);
+        Assert.Contains(productionResult.Failures!, f => f.Contains("RequireServiceApiKey"));
+        Assert.True(placeholderSecretResult.Failed);
+        Assert.Contains(placeholderSecretResult.Failures!, f => f.Contains("ServiceApiKey"));
+        Assert.True(invalidBoundsResult.Failed);
+        Assert.Contains(invalidBoundsResult.Failures!, f => f.Contains("temperature"));
+        Assert.Contains(invalidBoundsResult.Failures!, f => f.Contains("MaxStopSequences"));
+        Assert.Contains(invalidBoundsResult.Failures!, f => f.Contains("MaxStopSequenceCharacters"));
+        Assert.Contains(invalidBoundsResult.Failures!, f => f.Contains("MaxMetadataBytes"));
         Assert.True(new GatewayOptionsValidator().Validate(null, new GatewayOptions()).Succeeded);
     }
 
