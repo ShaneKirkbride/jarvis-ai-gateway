@@ -1,6 +1,6 @@
 # Jarvis AI Gateway
 
-A thin .NET 8 AI Gateway for Open WebUI → Amazon Bedrock Runtime in AWS GovCloud.
+A thin .NET 10 AI Gateway for Open WebUI → Amazon Bedrock Runtime in AWS GovCloud.
 
 This gateway is intentionally small. It gives Open WebUI an OpenAI-compatible API surface while keeping the real security controls in a private backend service.
 
@@ -93,12 +93,23 @@ dotnet run --project src/Jarvis.AiGateway/Jarvis.AiGateway.csproj
 
 ## Docker build
 
+The repository keeps a Dockerfile for real image builds in local development, GitHub Actions, AWS CodeBuild, or another runner with Docker installed and a reachable Docker daemon.
+
 ```bash
 docker build -t jarvis-ai-gateway .
 docker run --rm -p 8080:8080 \
   -e ASPNETCORE_ENVIRONMENT=Development \
   -e Gateway__RequireItarWorkspaceForItarRequests=false \
   jarvis-ai-gateway
+```
+
+If Docker is unavailable in an ephemeral validation environment, use the .NET SDK container publish target as a daemonless fallback validation path:
+
+```bash
+dotnet restore
+dotnet build -c Release
+dotnet test -c Release
+dotnet publish src/Jarvis.AiGateway/Jarvis.AiGateway.csproj -c Release --os linux --arch x64 /t:PublishContainer -p:ContainerArchiveOutputPath=./artifacts/jarvis-ai-gateway.tar.gz
 ```
 
 For local calls to Bedrock, use your normal AWS credential chain. For ECS deployment, do not bake credentials into the image. Use the ECS task role.
