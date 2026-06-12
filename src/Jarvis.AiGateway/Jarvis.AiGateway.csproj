@@ -10,6 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.Bedrock" Version="4.*" />
     <PackageReference Include="AWSSDK.BedrockRuntime" Version="4.*" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.*" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.*" />

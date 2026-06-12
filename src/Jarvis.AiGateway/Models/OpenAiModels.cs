@@ -23,6 +23,9 @@ public sealed class OpenAiChatCompletionRequest
     [JsonPropertyName("max_tokens")]
     public int? MaxTokens { get; set; }
 
+    [JsonPropertyName("stop")]
+    public JsonElement? Stop { get; set; }
+
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; set; }
 }
@@ -92,7 +95,7 @@ public sealed class OpenAiModelInfo
     public string Object { get; set; } = "model";
 
     [JsonPropertyName("created")]
-    public long Created { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    public long Created { get; set; } = 0;
 
     [JsonPropertyName("owned_by")]
     public string OwnedBy { get; set; } = "jarvis-ai-gateway";
