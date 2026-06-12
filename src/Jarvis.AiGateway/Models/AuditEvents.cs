@@ -21,6 +21,7 @@ public sealed class GatewayAuditEvent
     public bool? SupportsConverse { get; set; }
     public bool? StreamingSupported { get; set; }
     public string? PolicyDecision { get; set; }
+    public string? PolicyRuleId { get; set; }
     public int? TokenEstimate { get; set; }
     public string Region { get; set; } = string.Empty;
     public int PromptCharacters { get; set; }
@@ -29,5 +30,9 @@ public sealed class GatewayAuditEvent
     public int? OutputTokens { get; set; }
     public int? TotalTokens { get; set; }
     public long LatencyMs { get; set; }
+    public long? ProviderLatencyMs { get; set; }
+    public string? ErrorType { get; set; }
+    public string? ErrorCategory { get; set; }
+    public string? ProviderRequestId { get; set; }
     public string EndpointMode { get; set; } = "regional-or-vpce-configured";
 }

@@ -11,10 +11,10 @@ namespace Jarvis.AiGateway.Services;
 public interface IBedrockInvocationStrategy
 {
     string Name { get; }
-    bool CanHandle(GatewayModel model, OpenAiChatCompletionRequest request);
-    Task<OpenAiChatCompletionResponse> InvokeAsync(
+    bool CanHandle(GatewayModel model, AiChatRequest request);
+    Task<AiChatResult> InvokeAsync(
         GatewayModel model,
-        OpenAiChatCompletionRequest request,
+        AiChatRequest request,
         RequestContext context,
         CancellationToken cancellationToken);
 }
@@ -22,8 +22,8 @@ public interface IBedrockInvocationStrategy
 public interface IInvokeModelPayloadAdapter
 {
     bool CanHandle(GatewayModel model);
-    string BuildRequestBody(GatewayModel model, OpenAiChatCompletionRequest request, RequestContext context);
-    OpenAiChatCompletionResponse ParseResponseBody(GatewayModel model, string responseBody, RequestContext context);
+    string BuildRequestBody(GatewayModel model, AiChatRequest request, RequestContext context);
+    AiChatResult ParseResponseBody(GatewayModel model, string responseBody, RequestContext context);
 }
 
 public sealed class BedrockConverseInvocationStrategy(
@@ -35,14 +35,14 @@ public sealed class BedrockConverseInvocationStrategy(
     private readonly GatewayOptions _options = gatewayOptions.Value;
     public string Name => "converse";
 
-    public bool CanHandle(GatewayModel model, OpenAiChatCompletionRequest request)
+    public bool CanHandle(GatewayModel model, AiChatRequest request)
     {
         return model.SupportsConverse && !model.InvocationMode.Equals("InvokeModel", StringComparison.OrdinalIgnoreCase);
     }
 
-    public async Task<OpenAiChatCompletionResponse> InvokeAsync(
+    public async Task<AiChatResult> InvokeAsync(
         GatewayModel model,
-        OpenAiChatCompletionRequest request,
+        AiChatRequest request,
         RequestContext context,
         CancellationToken cancellationToken)
     {
@@ -51,7 +51,7 @@ public sealed class BedrockConverseInvocationStrategy(
 
         foreach (var input in request.Messages)
         {
-            var text = input.GetTextContent();
+            var text = input.Content;
             if (_options.Redaction.RedactBeforeBedrock)
             {
                 text = redactor.Redact(text).Text;
@@ -79,12 +79,12 @@ public sealed class BedrockConverseInvocationStrategy(
 
         var inferenceConfig = new InferenceConfiguration
         {
-            MaxTokens = Math.Min(request.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
-            Temperature = request.Temperature ?? 0.2F,
-            TopP = request.TopP ?? 0.9F
+            MaxTokens = Math.Min(request.Options.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
+            Temperature = request.Options.Temperature ?? 0.2F,
+            TopP = request.Options.TopP ?? 0.9F
         };
 
-        foreach (var stop in OpenAiRequestHelpers.GetStopSequences(request))
+        foreach (var stop in request.Options.StopSequences)
         {
             inferenceConfig.StopSequences.Add(stop);
         }
@@ -112,14 +112,16 @@ public sealed class BedrockConverseInvocationStrategy(
         }
 
         logger.LogInformation("Invoking Bedrock Converse for model {ModelId} ({Alias}).", model.BedrockModelId, model.Alias);
+        var providerStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var response = await bedrockRuntime.ConverseAsync(bedrockRequest, cancellationToken);
+        providerStopwatch.Stop();
         var responseText = response.Output?.Message?.Content?
             .Where(c => !string.IsNullOrEmpty(c.Text))
             .Select(c => c.Text)
             .DefaultIfEmpty(string.Empty)
             .Aggregate((a, b) => a + b) ?? string.Empty;
 
-        return OpenAiResponseFactory.FromText(model.Id, responseText, response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0, response.StopReason?.Value ?? "stop");
+        return new AiChatResult(responseText, new Jarvis.AiGateway.Models.TokenUsage(response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0), response.StopReason?.Value ?? "stop", new ProviderInvocationMetadata(model.ProviderName, Name, providerStopwatch.ElapsedMilliseconds, response.ResponseMetadata?.RequestId));
     }
 }
 
@@ -132,15 +134,15 @@ public sealed class BedrockInvokeModelTextInvocationStrategy(
     public string Name => "invoke-model";
     private readonly IReadOnlyList<IInvokeModelPayloadAdapter> _adapters = adapters.ToList();
 
-    public bool CanHandle(GatewayModel model, OpenAiChatCompletionRequest request)
+    public bool CanHandle(GatewayModel model, AiChatRequest request)
     {
         if (model.InvocationMode.Equals("Converse", StringComparison.OrdinalIgnoreCase)) return false;
         return _adapters.Any(a => a.CanHandle(model));
     }
 
-    public async Task<OpenAiChatCompletionResponse> InvokeAsync(
+    public async Task<AiChatResult> InvokeAsync(
         GatewayModel model,
-        OpenAiChatCompletionRequest request,
+        AiChatRequest request,
         RequestContext context,
         CancellationToken cancellationToken)
     {
@@ -160,15 +162,21 @@ public sealed class BedrockInvokeModelTextInvocationStrategy(
             Body = new MemoryStream(Encoding.UTF8.GetBytes(body))
         };
 
+        var providerStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var response = await bedrockRuntime.InvokeModelAsync(invokeRequest, cancellationToken);
+        providerStopwatch.Stop();
         using var reader = new StreamReader(response.Body, Encoding.UTF8);
         var responseBody = await reader.ReadToEndAsync(cancellationToken);
-        return adapter.ParseResponseBody(model, responseBody, context);
+        var result = adapter.ParseResponseBody(model, responseBody, context);
+        return result with { ProviderMetadata = result.ProviderMetadata with { InvocationStrategy = Name, LatencyMs = providerStopwatch.ElapsedMilliseconds, ProviderRequestId = response.ResponseMetadata?.RequestId } };
     }
 }
 
 public static class OpenAiResponseFactory
 {
+    public static OpenAiChatCompletionResponse FromResult(string modelId, AiChatResult result) =>
+        FromText(modelId, result.Text, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens, result.FinishReason);
+
     public static OpenAiChatCompletionResponse FromText(string modelId, string text, int inputTokens = 0, int outputTokens = 0, int totalTokens = 0, string finishReason = "stop") => new()
     {
         Model = modelId,
@@ -198,39 +206,18 @@ public static class OpenAiResponseFactory
 
 public static class OpenAiRequestHelpers
 {
-    public static string Prompt(OpenAiChatCompletionRequest request)
+    public static string Prompt(AiChatRequest request)
     {
         var builder = new StringBuilder();
         foreach (var message in request.Messages)
         {
             var role = string.IsNullOrWhiteSpace(message.Role) ? "user" : message.Role;
-            builder.Append(role).Append(": ").AppendLine(message.GetTextContent());
+            builder.Append(role).Append(": ").AppendLine(message.Content);
         }
 
         builder.Append("assistant: ");
         return builder.ToString();
     }
 
-    public static IReadOnlyList<string> GetStopSequences(OpenAiChatCompletionRequest request)
-    {
-        if (request.Stop is null) return [];
-        var stop = request.Stop.Value;
-        if (stop.ValueKind == JsonValueKind.String)
-        {
-            var value = stop.GetString();
-            return string.IsNullOrWhiteSpace(value) ? [] : [value];
-        }
-
-        if (stop.ValueKind == JsonValueKind.Array)
-        {
-            return stop.EnumerateArray()
-                .Where(e => e.ValueKind == JsonValueKind.String)
-                .Select(e => e.GetString() ?? string.Empty)
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Take(4)
-                .ToArray();
-        }
-
-        return [];
-    }
+    public static IReadOnlyList<string> GetStopSequences(AiChatRequest request) => request.Options.StopSequences;
 }

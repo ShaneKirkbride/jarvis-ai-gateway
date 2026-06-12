@@ -64,16 +64,16 @@ public sealed class RedactionValidationAndAdapterTests
     public void Openai_message_extracts_text_from_all_supported_content_shapes()
     {
         Assert.Equal("hello", Message(Json("hello")).GetTextContent());
-        Assert.Equal("a\nb", Message(Json(new object[] { new { text = "a" }, new { content = "b" }, new { image_url = "ignored" } })).GetTextContent());
-        Assert.Equal("object text", Message(Json(new { text = "object text" })).GetTextContent());
-        Assert.Equal("123", Message(Json(123)).GetTextContent());
+        Assert.Equal("a\nb", Message(Json(new object[] { new { type = "text", text = "a" }, new { type = "text", text = "b" } })).GetTextContent());
+        Assert.Equal("object text", Message(Json(new { type = "text", text = "object text" })).GetTextContent());
+        Assert.Throws<InvalidOperationException>(() => Message(Json(123)).GetTextContent());
     }
 
     [Fact]
     public void Request_helpers_build_prompt_and_stop_sequences()
     {
         var stopArray = Request("alias", stop: Json(new[] { "one", "two", "three", "four", "five" }));
-        var prompt = OpenAiRequestHelpers.Prompt(new OpenAiChatCompletionRequest
+        var prompt = OpenAiRequestHelpers.Prompt(ToAi(new OpenAiChatCompletionRequest
         {
             Model = "alias",
             Messages =
@@ -81,13 +81,13 @@ public sealed class RedactionValidationAndAdapterTests
                 new OpenAiMessage { Role = "", Content = Json("hello") },
                 new OpenAiMessage { Role = "assistant", Content = Json("hi") }
             ]
-        });
+        }));
 
         Assert.Equal("user: hello\nassistant: hi\nassistant: ", prompt.ReplaceLineEndings("\n"));
-        Assert.Equal(["stop"], OpenAiRequestHelpers.GetStopSequences(Request("alias", stop: Json("stop"))));
-        Assert.Equal(["one", "two", "three", "four"], OpenAiRequestHelpers.GetStopSequences(stopArray));
-        Assert.Empty(OpenAiRequestHelpers.GetStopSequences(Request("alias", stop: Json(123))));
-        Assert.Empty(OpenAiRequestHelpers.GetStopSequences(Request("alias")));
+        Assert.Equal(["stop"], OpenAiRequestHelpers.GetStopSequences(ToAi(Request("alias", stop: Json("stop")), ["stop"])));
+        Assert.Equal(["one", "two", "three", "four"], OpenAiRequestHelpers.GetStopSequences(ToAi(stopArray, ["one", "two", "three", "four"])));
+        Assert.Empty(OpenAiRequestHelpers.GetStopSequences(ToAi(Request("alias", stop: Json(123)))));
+        Assert.Empty(OpenAiRequestHelpers.GetStopSequences(ToAi(Request("alias"))));
     }
 
     [Fact]
@@ -118,23 +118,23 @@ public sealed class RedactionValidationAndAdapterTests
         Assert.False(titan.CanHandle(Model("other", "Other", 100, "other")));
         Assert.False(llama.CanHandle(Model("other", "Other", 100, "other")));
         Assert.False(mistral.CanHandle(Model("other", "Other", 100, "other")));
-        Assert.Contains("maxTokenCount\":100", titan.BuildRequestBody(titanModel, request, context));
-        Assert.Contains("max_gen_len\":100", llama.BuildRequestBody(llamaModel, request, context));
-        Assert.Contains("max_tokens\":100", mistral.BuildRequestBody(mistralModel, request, context));
+        Assert.Contains("maxTokenCount\":100", titan.BuildRequestBody(titanModel, ToAi(request, ["END"]), context));
+        Assert.Contains("max_gen_len\":100", llama.BuildRequestBody(llamaModel, ToAi(request, ["END"]), context));
+        Assert.Contains("max_tokens\":100", mistral.BuildRequestBody(mistralModel, ToAi(request, ["END"]), context));
 
-        Assert.Equal("titan output", titan.ParseResponseBody(titanModel, "{\"inputTextTokenCount\":3,\"results\":[{\"outputText\":\"titan output\",\"tokenCount\":4}]}", context).Choices[0].Message.Content);
+        Assert.Equal("titan output", titan.ParseResponseBody(titanModel, "{\"inputTextTokenCount\":3,\"results\":[{\"outputText\":\"titan output\",\"tokenCount\":4}]}", context).Text);
         var llamaResponse = llama.ParseResponseBody(llamaModel, "{\"generation\":\"llama output\",\"prompt_token_count\":5,\"generation_token_count\":6,\"stop_reason\":\"length\"}", context);
-        Assert.Equal("length", llamaResponse.Choices[0].FinishReason);
-        Assert.Equal(11, llamaResponse.Usage!.TotalTokens);
-        Assert.Equal("mistral output", mistral.ParseResponseBody(mistralModel, "{\"outputs\":[{\"text\":\"mistral output\",\"stop_reason\":\"stop\"}]}", context).Choices[0].Message.Content);
-        Assert.Equal(string.Empty, titan.ParseResponseBody(titanModel, "{}", context).Choices[0].Message.Content);
-        Assert.Equal(string.Empty, llama.ParseResponseBody(llamaModel, "{}", context).Choices[0].Message.Content);
-        Assert.Equal(string.Empty, mistral.ParseResponseBody(mistralModel, "{}", context).Choices[0].Message.Content);
+        Assert.Equal("length", llamaResponse.FinishReason);
+        Assert.Equal(11, llamaResponse.Usage.TotalTokens);
+        Assert.Equal("mistral output", mistral.ParseResponseBody(mistralModel, "{\"outputs\":[{\"text\":\"mistral output\",\"stop_reason\":\"stop\"}]}", context).Text);
+        Assert.Equal(string.Empty, titan.ParseResponseBody(titanModel, "{}", context).Text);
+        Assert.Equal(string.Empty, llama.ParseResponseBody(llamaModel, "{}", context).Text);
+        Assert.Equal(string.Empty, mistral.ParseResponseBody(mistralModel, "{}", context).Text);
     }
 
     private static OpenAiMessage Message(JsonElement content) => new() { Content = content };
 
-    private static OpenAiChatCompletionRequest Request(string model, int? maxTokens = null, JsonElement? stop = null) => new()
+    private static OpenAiChatCompletionRequest Request(string model, int? maxTokens = null, JsonElement? stop = null, IReadOnlyList<string>? stops = null) => new()
     {
         Model = model,
         MaxTokens = maxTokens,
@@ -143,6 +143,8 @@ public sealed class RedactionValidationAndAdapterTests
         Stop = stop,
         Messages = [new OpenAiMessage { Role = "user", Content = Json("hello") }]
     };
+
+    private static AiChatRequest ToAi(OpenAiChatCompletionRequest request, IReadOnlyList<string>? stops = null) => AiChatRequestMapper.FromValidatedOpenAi(request, stops);
 
     private static GatewayModel Model(string bedrockId, string provider, int maxTokens, string alias) => new()
     {

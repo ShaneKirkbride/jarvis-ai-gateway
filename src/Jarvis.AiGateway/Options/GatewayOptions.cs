@@ -16,12 +16,29 @@ public sealed class GatewayOptions
     public bool RequireItarWorkspaceForItarRequests { get; set; } = true;
     public List<string> ItarApprovedWorkspaceIds { get; set; } = [];
     public List<string> BlockedPromptPatterns { get; set; } = [];
+    public int MaxRequestBodyBytes { get; set; } = 1_048_576;
+    public int ProviderTimeoutSeconds { get; set; } = 120;
+    public int ModelDiscoveryTimeoutSeconds { get; set; } = 10;
+    public int ReadinessTimeoutSeconds { get; set; } = 5;
+    public RequestLimitOptions RequestLimits { get; set; } = new();
     public RedactionOptions Redaction { get; set; } = new();
     public RateLimitOptions RateLimit { get; set; } = new();
     public ModelDiscoveryOptions ModelDiscovery { get; set; } = new();
     public GatewayPolicyOptions Policy { get; set; } = new();
     public StreamingOptions Streaming { get; set; } = new();
     public List<ModelRouteOptions> Models { get; set; } = [];
+}
+
+public sealed class RequestLimitOptions
+{
+    public int MaxMetadataEntries { get; set; } = 16;
+    public int MaxMetadataKeyLength { get; set; } = 64;
+    public int MaxMetadataValueLength { get; set; } = 512;
+    public int MaxGatewayHeaderLength { get; set; } = 512;
+    public int MaxStopSequenceCount { get; set; } = 4;
+    public int MaxStopSequenceLength { get; set; } = 200;
+    public int MaxMessageCount { get; set; } = 128;
+    public int RegexTimeoutMilliseconds { get; set; } = 250;
 }
 
 public sealed class RedactionOptions

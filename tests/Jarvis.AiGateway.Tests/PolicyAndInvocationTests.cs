@@ -33,7 +33,7 @@ public sealed class PolicyAndInvocationTests
         var user = new UserContext("u1", "u1@example.test", new HashSet<string>(["AI-General-Users"]), new Dictionary<string, string>());
         var context = new RequestContext("r1", "c1", "itar-approved", "ITAR", true);
 
-        var decision = await policy.AuthorizeAsync(user, context, Request("general"), CancellationToken.None);
+        var decision = await policy.AuthorizeAsync(user, context, ToAi(Request("general")), CancellationToken.None);
 
         Assert.False(decision.Allowed);
         Assert.Contains("non-ITAR-approved", decision.Reason);
@@ -45,7 +45,7 @@ public sealed class PolicyAndInvocationTests
         var model = new GatewayModel { Id = "alias", Alias = "alias", BedrockModelId = "anthropic.claude-3-haiku-20240307-v1:0", SupportsConverse = true };
         var strategy = new BedrockConverseInvocationStrategy(null!, new NullRedactor(), Microsoft.Extensions.Options.Options.Create(new GatewayOptions()), NullLogger<BedrockConverseInvocationStrategy>.Instance);
 
-        Assert.True(strategy.CanHandle(model, Request("alias")));
+        Assert.True(strategy.CanHandle(model, ToAi(Request("alias"))));
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public sealed class PolicyAndInvocationTests
         var model = new GatewayModel { Id = "unknown", Alias = "unknown", BedrockModelId = "unknown.provider-model", ProviderName = "Unknown", SupportsConverse = false };
         var strategy = new BedrockInvokeModelTextInvocationStrategy(null!, [], NullLogger<BedrockInvokeModelTextInvocationStrategy>.Instance);
 
-        Assert.False(strategy.CanHandle(model, Request("unknown")));
+        Assert.False(strategy.CanHandle(model, ToAi(Request("unknown"))));
         Assert.Equal("Model is discovered but not supported by this gateway invocation adapter yet.", BedrockInvokeModelTextInvocationStrategy.UnsupportedAdapterMessage);
     }
 
@@ -94,6 +94,8 @@ public sealed class PolicyAndInvocationTests
             Messages = [new OpenAiMessage { Role = "user", Content = doc.RootElement.Clone() }]
         };
     }
+
+    private static AiChatRequest ToAi(OpenAiChatCompletionRequest request) => AiChatRequestMapper.FromValidatedOpenAi(request);
 
     private static DiscoveredBedrockModel Discovered(string id, string provider) => new()
     {

@@ -69,6 +69,26 @@ Gateway__RequireServiceApiKey=true
 Gateway__ServiceApiKey=<from Secrets Manager>
 ```
 
+
+Request hardening defaults are configurable under `Gateway`:
+
+```bash
+Gateway__MaxRequestBodyBytes=1048576
+Gateway__ProviderTimeoutSeconds=120
+Gateway__ModelDiscoveryTimeoutSeconds=10
+Gateway__ReadinessTimeoutSeconds=5
+Gateway__RequestLimits__MaxMetadataEntries=16
+Gateway__RequestLimits__MaxMetadataKeyLength=64
+Gateway__RequestLimits__MaxMetadataValueLength=512
+Gateway__RequestLimits__MaxGatewayHeaderLength=512
+Gateway__RequestLimits__MaxStopSequenceCount=4
+Gateway__RequestLimits__MaxStopSequenceLength=200
+Gateway__RequestLimits__MaxMessageCount=128
+Gateway__RequestLimits__RegexTimeoutMilliseconds=250
+```
+
+`POST /v1/chat/completions` accepts text-only OpenAI message content. Unsupported image, audio, tool, arbitrary object, or mixed non-text content is rejected with an OpenAI-compatible `400` response instead of being silently converted into prompt text. Configured regex patterns are validated at startup and are evaluated with explicit timeouts.
+
 Model routes are configured by alias:
 
 ```bash

@@ -42,9 +42,9 @@ public sealed class PolicyEngineMatrixTests
     [Fact]
     public async Task Authorize_allows_valid_non_itar_and_itar_requests()
     {
-        var nonItar = await Policy(Options(Model("general")), Discovered("general-id")).AuthorizeAsync(User(), Context(), Request("general"), CancellationToken.None);
+        var nonItar = await Policy(Options(Model("general")), Discovered("general-id")).AuthorizeAsync(User(), Context(), ToAi(Request("general")), CancellationToken.None);
         var itarOptions = new GatewayOptions { ItarApprovedWorkspaceIds = ["workspace"], Models = [Model("itar", itar: true)] };
-        var itar = await Policy(itarOptions, Discovered("itar-id")).AuthorizeAsync(User(), new RequestContext("r", "c", "workspace", "ITAR", false), Request("itar"), CancellationToken.None);
+        var itar = await Policy(itarOptions, Discovered("itar-id")).AuthorizeAsync(User(), new RequestContext("r", "c", "workspace", "ITAR", false), ToAi(Request("itar")), CancellationToken.None);
 
         Assert.True(nonItar.Allowed);
         Assert.Equal("ALLOW", nonItar.Reason);
@@ -57,9 +57,9 @@ public sealed class PolicyEngineMatrixTests
     {
         var options = new GatewayOptions();
         var disabled = await new PolicyEngine(MsOptions.Create(options), new StaticRegistry(new GatewayModel { Id = "disabled", Alias = "disabled", BedrockModelId = "disabled-id", Enabled = false, OutputModalities = ["TEXT"], RequiredGroups = [] }))
-            .AuthorizeAsync(User(), Context(), Request("disabled"), CancellationToken.None);
+            .AuthorizeAsync(User(), Context(), ToAi(Request("disabled")), CancellationToken.None);
         var nonText = await new PolicyEngine(MsOptions.Create(options), new StaticRegistry(new GatewayModel { Id = "image", Alias = "image", BedrockModelId = "image-id", Enabled = true, OutputModalities = ["IMAGE"], RequiredGroups = [] }))
-            .AuthorizeAsync(User(), Context(), Request("image"), CancellationToken.None);
+            .AuthorizeAsync(User(), Context(), ToAi(Request("image")), CancellationToken.None);
 
         Assert.False(disabled.Allowed);
         Assert.Equal("Model is disabled.", disabled.Reason);
@@ -70,7 +70,7 @@ public sealed class PolicyEngineMatrixTests
     private static async Task AssertDenied(GatewayOptions options, OpenAiChatCompletionRequest request, string expectedReason, DiscoveredBedrockModel? discovered, UserContext? user = null, RequestContext? context = null)
     {
         var discoveries = discovered is null ? [] : new[] { discovered };
-        var decision = await Policy(options, discoveries).AuthorizeAsync(user ?? User(), context ?? Context(), request, CancellationToken.None);
+        var decision = await Policy(options, discoveries).AuthorizeAsync(user ?? User(), context ?? Context(), ToAi(request), CancellationToken.None);
 
         Assert.False(decision.Allowed);
         Assert.Contains(expectedReason, decision.Reason);
@@ -93,6 +93,8 @@ public sealed class PolicyEngineMatrixTests
         OutputModalities = outputs?.ToList() ?? ["TEXT"],
         SupportsConverse = true
     };
+
+    private static AiChatRequest ToAi(OpenAiChatCompletionRequest request) => AiChatRequestMapper.FromValidatedOpenAi(request);
 
     private static DiscoveredBedrockModel Discovered(string id, string[]? outputs = null) => new()
     {

@@ -15,11 +15,6 @@ public sealed record RequestContext(
     string DataLabel,
     bool ItarMode);
 
-public sealed record PolicyDecision(
-    bool Allowed,
-    string Reason,
-    GatewayModel? Model);
-
 public sealed record RedactionResult(string Text, int RedactionCount);
 
 public sealed record BedrockChatResult(

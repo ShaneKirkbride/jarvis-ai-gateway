@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Jarvis.AiGateway.Models;
 using Jarvis.AiGateway.Options;
 using Microsoft.Extensions.Options;
@@ -95,9 +94,9 @@ public sealed class ModelRegistry(
 
     private bool IsDenied(GatewayModel model) => _options.Policy.DeniedModelIdPatterns.Any(p => IsMatch(model.BedrockModelId, p));
 
-    private static bool IsMatch(string value, string pattern)
+    private bool IsMatch(string value, string pattern)
     {
         if (string.IsNullOrWhiteSpace(pattern)) return false;
-        return Regex.IsMatch(value, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return GatewayRegex.IsMatch(value, pattern, _options, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 }

@@ -14,15 +14,15 @@ public sealed class RegexContentRedactor(IOptions<GatewayOptions> options) : ICo
 {
     private readonly GatewayOptions _options = options.Value;
 
-    private static readonly (Regex Regex, string Replacement)[] BuiltInPatterns =
+    private static readonly (string Pattern, string Replacement)[] BuiltInPatterns =
     [
-        (new Regex(@"AKIA[0-9A-Z]{16}", RegexOptions.Compiled), "[REDACTED_AWS_ACCESS_KEY]"),
-        (new Regex(@"(?i)(aws_secret_access_key\s*[=:]\s*)[A-Za-z0-9/+=]{32,}", RegexOptions.Compiled), "$1[REDACTED_AWS_SECRET]"),
-        (new Regex(@"(?i)(api[_-]?key\s*[=:]\s*)[A-Za-z0-9_\-]{16,}", RegexOptions.Compiled), "$1[REDACTED_API_KEY]"),
-        (new Regex(@"(?i)(password\s*[=:]\s*)\S+", RegexOptions.Compiled), "$1[REDACTED_PASSWORD]"),
-        (new Regex(@"\b\d{3}-\d{2}-\d{4}\b", RegexOptions.Compiled), "[REDACTED_SSN]"),
-        (new Regex(@"\b(?:\d[ -]*?){13,16}\b", RegexOptions.Compiled), "[REDACTED_POSSIBLE_CARD]"),
-        (new Regex(@"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----", RegexOptions.Compiled), "[REDACTED_PRIVATE_KEY]")
+        (@"AKIA[0-9A-Z]{16}", "[REDACTED_AWS_ACCESS_KEY]"),
+        (@"(?i)(aws_secret_access_key\s*[=:]\s*)[A-Za-z0-9/+=]{32,}", "$1[REDACTED_AWS_SECRET]"),
+        (@"(?i)(api[_-]?key\s*[=:]\s*)[A-Za-z0-9_\-]{16,}", "$1[REDACTED_API_KEY]"),
+        (@"(?i)(password\s*[=:]\s*)\S+", "$1[REDACTED_PASSWORD]"),
+        (@"\b\d{3}-\d{2}-\d{4}\b", "[REDACTED_SSN]"),
+        (@"\b(?:\d[ -]*?){13,16}\b", "[REDACTED_POSSIBLE_CARD]"),
+        (@"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----", "[REDACTED_PRIVATE_KEY]")
     ];
 
     public RedactionResult Redact(string text)
@@ -35,8 +35,9 @@ public sealed class RegexContentRedactor(IOptions<GatewayOptions> options) : ICo
         var count = 0;
         var redacted = text;
 
-        foreach (var (regex, replacement) in BuiltInPatterns)
+        foreach (var (pattern, replacement) in BuiltInPatterns)
         {
+            var regex = GatewayRegex.Create(pattern, _options, RegexOptions.Compiled);
             var matches = regex.Matches(redacted).Count;
             if (matches > 0)
             {
