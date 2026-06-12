@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Claims;
 using Amazon;
 using Amazon.Bedrock;
@@ -32,6 +31,11 @@ builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 
 var gatewayOptions = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
 var jwtOptions = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOptions();
+
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = Math.Max(1024, gatewayOptions.MaxRequestBodyBytes);
+});
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -140,6 +144,14 @@ builder.Services.AddSingleton<IInvokeModelPayloadAdapter, AmazonTitanTextInvokeM
 builder.Services.AddSingleton<IInvokeModelPayloadAdapter, MetaLlamaInvokeModelPayloadAdapter>();
 builder.Services.AddSingleton<IInvokeModelPayloadAdapter, MistralInvokeModelPayloadAdapter>();
 builder.Services.AddSingleton<IModelRegistry, ModelRegistry>();
+builder.Services.AddSingleton<IPolicyRule, ModelConfiguredRule>();
+builder.Services.AddSingleton<IPolicyRule, ModelEnabledRule>();
+builder.Services.AddSingleton<IPolicyRule, ModelTextOutputRule>();
+builder.Services.AddSingleton<IPolicyRule, GroupAuthorizationRule>();
+builder.Services.AddSingleton<IPolicyRule, PromptSizeRule>();
+builder.Services.AddSingleton<IPolicyRule, BlockedPatternRule>();
+builder.Services.AddSingleton<IPolicyRule, ItarModelRule>();
+builder.Services.AddSingleton<IPolicyRule, ItarWorkspaceRule>();
 builder.Services.AddSingleton<IPolicyEngine, PolicyEngine>();
 builder.Services.AddSingleton<IOpenAiChatRequestValidator, OpenAiChatRequestValidator>();
 builder.Services.AddSingleton<IReadinessCheck, GatewayReadinessCheck>();
@@ -321,11 +333,5 @@ app.Run();
 
 static string NormalizeEndpoint(string endpoint) => endpoint.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? endpoint : $"https://{endpoint}";
 
-static int EstimateTokens(string text) => Math.Max(1, text.Length / 4);
 
-static IResult WriteDenied(IAuditLogger auditLogger, GatewayAuditEvent audit, Stopwatch stopwatch, int statusCode, string message, string? code = null)
-{
-    audit.LatencyMs = stopwatch.ElapsedMilliseconds;
-    auditLogger.Write(audit);
-    return Results.Json(OpenAiErrorResponse.Create(message, code: code), statusCode: statusCode);
-}
+public partial class Program;

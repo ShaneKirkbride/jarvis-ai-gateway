@@ -9,23 +9,23 @@ public sealed class AmazonTitanTextInvokeModelPayloadAdapter : IInvokeModelPaylo
         model.BedrockModelId.Contains("amazon.titan-text", StringComparison.OrdinalIgnoreCase) ||
         (model.ProviderName.Equals("Amazon", StringComparison.OrdinalIgnoreCase) && model.BedrockModelId.Contains("titan", StringComparison.OrdinalIgnoreCase) && model.HasTextOutput);
 
-    public string BuildRequestBody(GatewayModel model, OpenAiChatCompletionRequest request, RequestContext context)
+    public string BuildRequestBody(GatewayModel model, AiChatRequest request, RequestContext context)
     {
         var body = new
         {
             inputText = OpenAiRequestHelpers.Prompt(request),
             textGenerationConfig = new
             {
-                maxTokenCount = Math.Min(request.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
-                temperature = request.Temperature ?? 0.2F,
-                topP = request.TopP ?? 0.9F,
+                maxTokenCount = Math.Min(request.Options.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
+                temperature = request.Options.Temperature ?? 0.2F,
+                topP = request.Options.TopP ?? 0.9F,
                 stopSequences = OpenAiRequestHelpers.GetStopSequences(request)
             }
         };
         return JsonSerializer.Serialize(body, JsonDefaults.Options);
     }
 
-    public OpenAiChatCompletionResponse ParseResponseBody(GatewayModel model, string responseBody, RequestContext context)
+    public AiChatResult ParseResponseBody(GatewayModel model, string responseBody, RequestContext context)
     {
         using var doc = JsonDocument.Parse(responseBody);
         var root = doc.RootElement;
@@ -39,7 +39,7 @@ public sealed class AmazonTitanTextInvokeModelPayloadAdapter : IInvokeModelPaylo
         }
 
         var inputTokens = root.TryGetProperty("inputTextTokenCount", out var inputTokenCount) ? inputTokenCount.GetInt32() : 0;
-        return OpenAiResponseFactory.FromText(model.Id, text, inputTokens, outputTokens);
+        return new AiChatResult(text, new TokenUsage(inputTokens, outputTokens, inputTokens + outputTokens), "stop", new ProviderInvocationMetadata(model.ProviderName, "invoke-model", 0));
     }
 }
 
@@ -49,19 +49,19 @@ public sealed class MetaLlamaInvokeModelPayloadAdapter : IInvokeModelPayloadAdap
         model.BedrockModelId.Contains("meta.llama", StringComparison.OrdinalIgnoreCase) ||
         model.ProviderName.Equals("Meta", StringComparison.OrdinalIgnoreCase);
 
-    public string BuildRequestBody(GatewayModel model, OpenAiChatCompletionRequest request, RequestContext context)
+    public string BuildRequestBody(GatewayModel model, AiChatRequest request, RequestContext context)
     {
         var body = new
         {
             prompt = OpenAiRequestHelpers.Prompt(request),
-            max_gen_len = Math.Min(request.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
-            temperature = request.Temperature ?? 0.2F,
-            top_p = request.TopP ?? 0.9F
+            max_gen_len = Math.Min(request.Options.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
+            temperature = request.Options.Temperature ?? 0.2F,
+            top_p = request.Options.TopP ?? 0.9F
         };
         return JsonSerializer.Serialize(body, JsonDefaults.Options);
     }
 
-    public OpenAiChatCompletionResponse ParseResponseBody(GatewayModel model, string responseBody, RequestContext context)
+    public AiChatResult ParseResponseBody(GatewayModel model, string responseBody, RequestContext context)
     {
         using var doc = JsonDocument.Parse(responseBody);
         var root = doc.RootElement;
@@ -69,7 +69,7 @@ public sealed class MetaLlamaInvokeModelPayloadAdapter : IInvokeModelPayloadAdap
         var promptTokens = root.TryGetProperty("prompt_token_count", out var prompt) ? prompt.GetInt32() : 0;
         var generationTokens = root.TryGetProperty("generation_token_count", out var output) ? output.GetInt32() : 0;
         var stopReason = root.TryGetProperty("stop_reason", out var stop) ? stop.GetString() ?? "stop" : "stop";
-        return OpenAiResponseFactory.FromText(model.Id, text, promptTokens, generationTokens, promptTokens + generationTokens, stopReason);
+        return new AiChatResult(text, new TokenUsage(promptTokens, generationTokens, promptTokens + generationTokens), stopReason, new ProviderInvocationMetadata(model.ProviderName, "invoke-model", 0));
     }
 }
 
@@ -80,20 +80,20 @@ public sealed class MistralInvokeModelPayloadAdapter : IInvokeModelPayloadAdapte
         model.ProviderName.Equals("Mistral AI", StringComparison.OrdinalIgnoreCase) ||
         model.ProviderName.Equals("Mistral", StringComparison.OrdinalIgnoreCase);
 
-    public string BuildRequestBody(GatewayModel model, OpenAiChatCompletionRequest request, RequestContext context)
+    public string BuildRequestBody(GatewayModel model, AiChatRequest request, RequestContext context)
     {
         var body = new
         {
             prompt = OpenAiRequestHelpers.Prompt(request),
-            max_tokens = Math.Min(request.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
-            temperature = request.Temperature ?? 0.2F,
-            top_p = request.TopP ?? 0.9F,
+            max_tokens = Math.Min(request.Options.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
+            temperature = request.Options.Temperature ?? 0.2F,
+            top_p = request.Options.TopP ?? 0.9F,
             stop = OpenAiRequestHelpers.GetStopSequences(request)
         };
         return JsonSerializer.Serialize(body, JsonDefaults.Options);
     }
 
-    public OpenAiChatCompletionResponse ParseResponseBody(GatewayModel model, string responseBody, RequestContext context)
+    public AiChatResult ParseResponseBody(GatewayModel model, string responseBody, RequestContext context)
     {
         using var doc = JsonDocument.Parse(responseBody);
         var root = doc.RootElement;
@@ -106,7 +106,7 @@ public sealed class MistralInvokeModelPayloadAdapter : IInvokeModelPayloadAdapte
             if (first.TryGetProperty("stop_reason", out var stopElement)) stopReason = stopElement.GetString() ?? "stop";
         }
 
-        return OpenAiResponseFactory.FromText(model.Id, text, finishReason: stopReason);
+        return new AiChatResult(text, new TokenUsage(0, 0, 0), stopReason, new ProviderInvocationMetadata(model.ProviderName, "invoke-model", 0));
     }
 }
 

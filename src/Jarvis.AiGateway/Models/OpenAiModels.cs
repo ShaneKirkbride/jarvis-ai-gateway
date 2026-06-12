@@ -38,42 +38,79 @@ public sealed class OpenAiMessage
     [JsonPropertyName("content")]
     public JsonElement Content { get; set; }
 
-    public string GetTextContent()
+    public bool TryGetTextContent(out string text, out string? error)
     {
+        text = string.Empty;
+        error = null;
+
         if (Content.ValueKind == JsonValueKind.String)
         {
-            return Content.GetString() ?? string.Empty;
+            text = Content.GetString() ?? string.Empty;
+            return true;
         }
 
         if (Content.ValueKind == JsonValueKind.Array)
         {
             var parts = new List<string>();
+            var index = 0;
             foreach (var item in Content.EnumerateArray())
             {
-                if (item.ValueKind == JsonValueKind.Object)
+                if (item.ValueKind != JsonValueKind.Object)
                 {
-                    if (item.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+                    error = $"messages content part at index {index} must be an object with type 'text'.";
+                    return false;
+                }
+
+                if (item.TryGetProperty("type", out var typeElement))
+                {
+                    if (typeElement.ValueKind != JsonValueKind.String ||
+                        !string.Equals(typeElement.GetString(), "text", StringComparison.OrdinalIgnoreCase))
                     {
-                        parts.Add(text.GetString() ?? string.Empty);
-                    }
-                    else if (item.TryGetProperty("content", out var nestedContent) && nestedContent.ValueKind == JsonValueKind.String)
-                    {
-                        parts.Add(nestedContent.GetString() ?? string.Empty);
+                        error = $"unsupported content part type at index {index}; only text content is supported.";
+                        return false;
                     }
                 }
+
+                if (item.TryGetProperty("text", out var textElement) && textElement.ValueKind == JsonValueKind.String)
+                {
+                    parts.Add(textElement.GetString() ?? string.Empty);
+                }
+                else
+                {
+                    error = $"text content part at index {index} must include a string text property.";
+                    return false;
+                }
+
+                index++;
             }
 
-            return string.Join("\n", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
+            text = string.Join("\n", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
+            return true;
         }
 
         if (Content.ValueKind == JsonValueKind.Object &&
+            Content.TryGetProperty("type", out var objectType) &&
+            objectType.ValueKind == JsonValueKind.String &&
+            string.Equals(objectType.GetString(), "text", StringComparison.OrdinalIgnoreCase) &&
             Content.TryGetProperty("text", out var objectText) &&
             objectText.ValueKind == JsonValueKind.String)
         {
-            return objectText.GetString() ?? string.Empty;
+            text = objectText.GetString() ?? string.Empty;
+            return true;
         }
 
-        return Content.GetRawText();
+        error = "message content must be a string or OpenAI text content parts; image, tool, audio, and arbitrary object content are not supported.";
+        return false;
+    }
+
+    public string GetTextContent()
+    {
+        if (TryGetTextContent(out var text, out _))
+        {
+            return text;
+        }
+
+        throw new InvalidOperationException("Unsupported OpenAI message content. Validate the request before extracting text.");
     }
 }
 
