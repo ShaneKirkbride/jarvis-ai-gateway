@@ -113,13 +113,13 @@ public sealed class BedrockConverseInvocationStrategy(
 
         logger.LogInformation("Invoking Bedrock Converse for model {ModelId} ({Alias}).", model.BedrockModelId, model.Alias);
         var response = await bedrockRuntime.ConverseAsync(bedrockRequest, cancellationToken);
-        var text = response.Output?.Message?.Content?
+        var responseText = response.Output?.Message?.Content?
             .Where(c => !string.IsNullOrEmpty(c.Text))
             .Select(c => c.Text)
             .DefaultIfEmpty(string.Empty)
             .Aggregate((a, b) => a + b) ?? string.Empty;
 
-        return OpenAiResponseFactory.FromText(model.Id, text, response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0, response.StopReason?.Value ?? "stop");
+        return OpenAiResponseFactory.FromText(model.Id, responseText, response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0, response.StopReason?.Value ?? "stop");
     }
 }
 

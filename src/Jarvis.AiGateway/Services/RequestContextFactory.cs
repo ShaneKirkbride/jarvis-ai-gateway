@@ -30,7 +30,7 @@ public sealed class RequestContextFactory : IRequestContextFactory
             ?? GetMetadataString(request, "itar_mode");
 
         var itarMode = bool.TryParse(itarHeader, out var parsed) && parsed;
-        if (dataLabel.Contains("ITAR", StringComparison.OrdinalIgnoreCase))
+        if (DataLabelClassifier.IsItar(dataLabel))
         {
             itarMode = true;
         }

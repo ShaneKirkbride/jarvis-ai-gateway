@@ -64,7 +64,7 @@ public sealed class PolicyEngine(IOptions<GatewayOptions> options, IModelRegistr
             }
         }
 
-        if (context.ItarMode || context.DataLabel.Contains("ITAR", StringComparison.OrdinalIgnoreCase))
+        if (context.ItarMode || DataLabelClassifier.IsItar(context.DataLabel))
         {
             if (!model.ItarApproved)
             {
