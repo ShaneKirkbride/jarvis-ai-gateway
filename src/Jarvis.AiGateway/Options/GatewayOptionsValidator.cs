@@ -58,6 +58,11 @@ public sealed class GatewayOptionsValidator(IHostEnvironment? hostEnvironment = 
             failures.Add("Gateway:RequestValidation:MaxMetadataBytes must be greater than zero.");
         }
 
+
+        ValidateRegexes(options.BlockedPromptPatterns, "Gateway:BlockedPromptPatterns", options, failures);
+        ValidateRegexes(options.Policy.AllowedModelIdPatterns, "Gateway:Policy:AllowedModelIdPatterns", options, failures);
+        ValidateRegexes(options.Policy.DeniedModelIdPatterns, "Gateway:Policy:DeniedModelIdPatterns", options, failures);
+
         foreach (var model in options.Models)
         {
             if (string.IsNullOrWhiteSpace(model.Alias))
@@ -82,6 +87,27 @@ public sealed class GatewayOptionsValidator(IHostEnvironment? hostEnvironment = 
         }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+    }
+
+    private static void ValidateRegexes(IEnumerable<string> patterns, string path, GatewayOptions options, List<string> failures)
+    {
+        var index = 0;
+        foreach (var pattern in patterns)
+        {
+            if (!string.IsNullOrWhiteSpace(pattern))
+            {
+                try
+                {
+                    _ = GatewayRegex.Create(pattern, options);
+                }
+                catch (ArgumentException)
+                {
+                    failures.Add($"{path}[{index}] contains an invalid regex pattern.");
+                }
+            }
+
+            index++;
+        }
     }
 
     private bool IsProduction(GatewayOptions options)

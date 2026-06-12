@@ -152,8 +152,10 @@ builder.Services.AddSingleton<IPolicyRule, PromptSizeRule>();
 builder.Services.AddSingleton<IPolicyRule, BlockedPatternRule>();
 builder.Services.AddSingleton<IPolicyRule, ItarModelRule>();
 builder.Services.AddSingleton<IPolicyRule, ItarWorkspaceRule>();
-builder.Services.AddSingleton<IPolicyEngine, PolicyEngine>();
+builder.Services.AddSingleton<IPolicyEngine>(sp => new PolicyEngine(sp.GetRequiredService<IModelRegistry>(), sp.GetServices<IPolicyRule>()));
 builder.Services.AddSingleton<IOpenAiChatRequestValidator, OpenAiChatRequestValidator>();
+builder.Services.AddSingleton<IOpenAiErrorMapper, OpenAiErrorMapper>();
+builder.Services.AddSingleton<IChatCompletionOrchestrator, ChatCompletionOrchestrator>();
 builder.Services.AddSingleton<IReadinessCheck, GatewayReadinessCheck>();
 builder.Services.AddSingleton<IGatewayMetrics, GatewayMetrics>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockConverseInvocationStrategy>();
@@ -209,122 +211,10 @@ app.MapGet("/v1/models", async (
 app.MapPost("/v1/chat/completions", async (
         HttpContext httpContext,
         OpenAiChatCompletionRequest request,
-        IUserContextFactory userContextFactory,
-        IRequestContextFactory requestContextFactory,
-        IPolicyEngine policyEngine,
-        IOpenAiChatRequestValidator requestValidator,
-        IGatewayMetrics metrics,
-        IEnumerable<IBedrockInvocationStrategy> strategies,
-        IContentRedactor redactor,
-        IAuditLogger auditLogger,
-        IOptions<GatewayOptions> options,
+        IChatCompletionOrchestrator orchestrator,
         CancellationToken cancellationToken) =>
     {
-        var stopwatch = Stopwatch.StartNew();
-        var user = userContextFactory.Create(httpContext.User);
-        var requestContext = requestContextFactory.Create(httpContext, request);
-        var promptText = string.Empty;
-        var audit = new GatewayAuditEvent
-        {
-            RequestId = requestContext.RequestId,
-            CorrelationId = requestContext.CorrelationId,
-            UserSubject = user.Subject,
-            UserEmail = user.Email,
-            UserGroups = user.Groups.ToArray(),
-            WorkspaceId = requestContext.WorkspaceId,
-            DataLabel = requestContext.DataLabel,
-            ItarMode = requestContext.ItarMode,
-            RequestedModelAlias = request.Model ?? string.Empty,
-            Region = options.Value.AwsRegion,
-            EndpointMode = string.IsNullOrWhiteSpace(options.Value.BedrockRuntimeEndpointDns) ? "regional-dns" : "vpce-override",
-            PromptCharacters = 0
-        };
-
-        try
-        {
-            var validation = await requestValidator.ValidateAsync(request, cancellationToken);
-            if (!validation.IsValid)
-            {
-                audit.Decision = "DENY";
-                audit.DenyReason = validation.Message;
-                metrics.RecordPolicyDenial(validation.Code ?? "validation_error", request.Model ?? string.Empty);
-                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status400BadRequest, validation.Message ?? "Invalid request.", validation.Code);
-            }
-
-            promptText = string.Join("\n", request.Messages.Select(m => m.GetTextContent()));
-            audit.PromptCharacters = promptText.Length;
-
-            var logRedaction = options.Value.Redaction.RedactBeforeLogging ? redactor.Redact(promptText) : new RedactionResult(promptText, 0);
-            audit.RedactionCount = logRedaction.RedactionCount;
-
-            var decision = await policyEngine.AuthorizeAsync(user, requestContext, request, cancellationToken);
-            audit.Decision = decision.Allowed ? "ALLOW" : "DENY";
-            audit.DenyReason = decision.Allowed ? null : decision.Reason;
-            audit.ResolvedBedrockModelId = decision.Model?.BedrockModelId;
-            audit.Provider = decision.Model?.ProviderName ?? "aws-bedrock";
-            audit.SupportsConverse = decision.Model?.SupportsConverse;
-            audit.StreamingSupported = decision.Model?.ResponseStreamingSupported;
-            audit.PolicyDecision = decision.Reason;
-            audit.PolicyRuleId = decision.RuleId;
-
-            if (!decision.Allowed || decision.Model is null)
-            {
-                metrics.RecordPolicyDenial(decision.RuleId, request.Model ?? string.Empty);
-                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status403Forbidden, decision.Reason, decision.RuleId);
-            }
-
-            var orderedStrategies = strategies.OrderBy(s => s is BedrockConverseInvocationStrategy ? 0 : 1).ToArray();
-            var strategy = orderedStrategies.FirstOrDefault(s => s.CanHandle(decision.Model, request));
-            if (strategy is null)
-            {
-                audit.Decision = "DENY";
-                audit.DenyReason = BedrockInvokeModelTextInvocationStrategy.UnsupportedAdapterMessage;
-                return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status501NotImplemented, audit.DenyReason, "unsupported_model");
-            }
-
-            audit.InvocationStrategy = strategy.Name;
-            metrics.RecordRequest(request.Model ?? string.Empty);
-            var bedrockStopwatch = Stopwatch.StartNew();
-            var response = await strategy.InvokeAsync(decision.Model, request, requestContext, cancellationToken);
-            metrics.RecordBedrockInvocation(strategy.Name, bedrockStopwatch.Elapsed, success: true);
-            response.Model = decision.Model.Id;
-
-            if (options.Value.Redaction.Enabled)
-            {
-                foreach (var choice in response.Choices)
-                {
-                    var redacted = redactor.Redact(choice.Message.Content);
-                    choice.Message.Content = redacted.Text;
-                    audit.RedactionCount += redacted.RedactionCount;
-                }
-            }
-
-            audit.InputTokens = response.Usage?.PromptTokens;
-            audit.OutputTokens = response.Usage?.CompletionTokens;
-            audit.TotalTokens = response.Usage?.TotalTokens;
-            audit.TokenEstimate = response.Usage?.TotalTokens ?? EstimateTokens(promptText);
-            metrics.RecordTokenUsage(request.Model ?? string.Empty, audit.InputTokens ?? 0, audit.OutputTokens ?? 0);
-            audit.LatencyMs = stopwatch.ElapsedMilliseconds;
-            auditLogger.Write(audit);
-            metrics.RecordLatency(request.Model ?? string.Empty, stopwatch.Elapsed);
-            return Results.Json(response);
-        }
-        catch (NotSupportedException ex)
-        {
-            audit.Decision = "DENY";
-            audit.DenyReason = ex.Message;
-            return WriteDenied(auditLogger, audit, stopwatch, StatusCodes.Status501NotImplemented, ex.Message, "unsupported_model");
-        }
-        catch (Exception ex)
-        {
-            audit.Decision = "ERROR";
-            audit.DenyReason = ex.Message;
-            audit.LatencyMs = stopwatch.ElapsedMilliseconds;
-            auditLogger.Write(audit);
-            metrics.RecordBedrockError(request.Model ?? string.Empty);
-            metrics.RecordServerError("chat_completions");
-            return Results.Json(OpenAiErrorResponse.Create("Bedrock invocation failed.", "server_error", "bedrock_error"), statusCode: StatusCodes.Status502BadGateway);
-        }
+        return await orchestrator.CompleteAsync(httpContext, request, cancellationToken);
     })
     .RequireAuthorization()
     .RequireRateLimiting("per-user");

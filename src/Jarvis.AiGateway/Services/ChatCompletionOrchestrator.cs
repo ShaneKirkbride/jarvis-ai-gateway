@@ -10,18 +10,56 @@ public interface IChatCompletionOrchestrator
     Task<IResult> CompleteAsync(HttpContext httpContext, OpenAiChatCompletionRequest request, CancellationToken cancellationToken);
 }
 
-public sealed class ChatCompletionOrchestrator(
-    IUserContextFactory userContextFactory,
-    IRequestContextFactory requestContextFactory,
-    IOpenAiChatRequestValidator validator,
-    IPolicyEngine policyEngine,
-    IEnumerable<IBedrockInvocationStrategy> strategies,
-    IContentRedactor redactor,
-    IAuditLogger auditLogger,
-    IOpenAiErrorMapper errorMapper,
-    IOptions<GatewayOptions> options) : IChatCompletionOrchestrator
+public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
 {
-    private readonly GatewayOptions _options = options.Value;
+    private readonly IUserContextFactory userContextFactory;
+    private readonly IRequestContextFactory requestContextFactory;
+    private readonly IOpenAiChatRequestValidator validator;
+    private readonly IPolicyEngine policyEngine;
+    private readonly IEnumerable<IBedrockInvocationStrategy> strategies;
+    private readonly IContentRedactor redactor;
+    private readonly IAuditLogger auditLogger;
+    private readonly IOpenAiErrorMapper errorMapper;
+    private readonly IGatewayMetrics metrics;
+    private readonly GatewayOptions _options;
+
+    public ChatCompletionOrchestrator(
+        IUserContextFactory userContextFactory,
+        IRequestContextFactory requestContextFactory,
+        IOpenAiChatRequestValidator validator,
+        IPolicyEngine policyEngine,
+        IEnumerable<IBedrockInvocationStrategy> strategies,
+        IContentRedactor redactor,
+        IAuditLogger auditLogger,
+        IOpenAiErrorMapper errorMapper,
+        IOptions<GatewayOptions> options)
+        : this(userContextFactory, requestContextFactory, validator, policyEngine, strategies, redactor, auditLogger, errorMapper, new NoOpGatewayMetrics(), options)
+    {
+    }
+
+    public ChatCompletionOrchestrator(
+        IUserContextFactory userContextFactory,
+        IRequestContextFactory requestContextFactory,
+        IOpenAiChatRequestValidator validator,
+        IPolicyEngine policyEngine,
+        IEnumerable<IBedrockInvocationStrategy> strategies,
+        IContentRedactor redactor,
+        IAuditLogger auditLogger,
+        IOpenAiErrorMapper errorMapper,
+        IGatewayMetrics metrics,
+        IOptions<GatewayOptions> options)
+    {
+        this.userContextFactory = userContextFactory;
+        this.requestContextFactory = requestContextFactory;
+        this.validator = validator;
+        this.policyEngine = policyEngine;
+        this.strategies = strategies;
+        this.redactor = redactor;
+        this.auditLogger = auditLogger;
+        this.errorMapper = errorMapper;
+        this.metrics = metrics;
+        _options = options.Value;
+    }
 
     public async Task<IResult> CompleteAsync(HttpContext httpContext, OpenAiChatCompletionRequest request, CancellationToken cancellationToken)
     {
@@ -35,12 +73,14 @@ public sealed class ChatCompletionOrchestrator(
         {
             if (!validation.IsValid || validation.AiRequest is null)
             {
+                metrics.RecordPolicyDenial(validation.Code ?? "validation_error", request.Model ?? string.Empty);
                 return WriteMapped(audit, stopwatch, errorMapper.MapValidation(validation));
             }
 
             if (request.Stream && !_options.Streaming.FallbackToNonStreaming)
             {
                 var streamValidation = OpenAiChatValidationResult.Failure(new OpenAiValidationError("streaming_unsupported", "Streaming responses are not implemented by this gateway.", "stream"));
+                metrics.RecordPolicyDenial(streamValidation.Code ?? "streaming_unsupported", request.Model ?? string.Empty);
                 return WriteMapped(audit, stopwatch, errorMapper.MapValidation(streamValidation));
             }
 
@@ -53,12 +93,14 @@ public sealed class ChatCompletionOrchestrator(
             PopulatePolicyAudit(audit, decision);
             if (!decision.Allowed || decision.Model is null)
             {
+                metrics.RecordPolicyDenial(decision.RuleId, request.Model ?? string.Empty);
                 return WriteMapped(audit, stopwatch, errorMapper.MapPolicyDenied(decision));
             }
 
             validation = validator.Validate(httpContext, request, decision.Model);
             if (!validation.IsValid || validation.AiRequest is null)
             {
+                metrics.RecordPolicyDenial(validation.Code ?? "validation_error", request.Model ?? string.Empty);
                 return WriteMapped(audit, stopwatch, errorMapper.MapValidation(validation));
             }
 
@@ -70,13 +112,16 @@ public sealed class ChatCompletionOrchestrator(
             }
 
             audit.InvocationStrategy = strategy.Name;
+            metrics.RecordRequest(request.Model ?? string.Empty);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, _options.ProviderTimeoutSeconds)));
 
             AiChatResult result;
+            var providerStopwatch = Stopwatch.StartNew();
             try
             {
                 result = await strategy.InvokeAsync(decision.Model, validation.AiRequest, requestContext, timeoutCts.Token);
+                metrics.RecordBedrockInvocation(strategy.Name, providerStopwatch.Elapsed, success: true);
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
             {
@@ -96,6 +141,8 @@ public sealed class ChatCompletionOrchestrator(
 
             PopulateSuccessAudit(audit, result, stopwatch.ElapsedMilliseconds);
             auditLogger.Write(audit);
+            metrics.RecordTokenUsage(request.Model ?? string.Empty, audit.InputTokens ?? 0, audit.OutputTokens ?? 0);
+            metrics.RecordLatency(request.Model ?? string.Empty, stopwatch.Elapsed);
             return Results.Json(response);
         }
         catch (Exception ex)
@@ -107,6 +154,8 @@ public sealed class ChatCompletionOrchestrator(
             audit.ErrorCategory = mapping.ErrorCategory;
             audit.LatencyMs = stopwatch.ElapsedMilliseconds;
             auditLogger.Write(audit);
+            metrics.RecordBedrockError(request.Model ?? string.Empty);
+            metrics.RecordServerError("chat_completions");
             return Results.Json(mapping.Response, statusCode: mapping.StatusCode);
         }
     }
@@ -148,6 +197,17 @@ public sealed class ChatCompletionOrchestrator(
         audit.Provider = decision.Model?.ProviderName ?? "aws-bedrock";
         audit.SupportsConverse = decision.Model?.SupportsConverse;
         audit.StreamingSupported = decision.Model?.ResponseStreamingSupported;
+    }
+
+    private sealed class NoOpGatewayMetrics : IGatewayMetrics
+    {
+        public void RecordRequest(string modelAlias) { }
+        public void RecordLatency(string modelAlias, TimeSpan elapsed) { }
+        public void RecordPolicyDenial(string ruleId, string modelAlias) { }
+        public void RecordBedrockInvocation(string strategy, TimeSpan elapsed, bool success) { }
+        public void RecordBedrockError(string modelAlias) { }
+        public void RecordServerError(string route) { }
+        public void RecordTokenUsage(string modelAlias, int inputTokens, int outputTokens) { }
     }
 
     private static void PopulateSuccessAudit(GatewayAuditEvent audit, AiChatResult result, long latencyMs)
