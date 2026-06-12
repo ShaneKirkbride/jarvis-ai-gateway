@@ -1,0 +1,41 @@
+# Core runtime
+ASPNETCORE_ENVIRONMENT=Production
+ASPNETCORE_URLS=http://+:8080
+Gateway__EnvironmentName=prod-govcloud
+Gateway__AwsRegion=us-gov-west-1
+
+# Optional but recommended when enterprise DNS bypasses private hosted zone behavior.
+# Do not include https:// unless you want to override exactly.
+Gateway__BedrockRuntimeEndpointDns=vpce-REPLACE.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com
+
+# Service-to-service key between Open WebUI/reverse proxy and gateway.
+Gateway__RequireServiceApiKey=true
+Gateway__ServiceApiKey=REPLACE_WITH_SECRET_FROM_SECRETS_MANAGER
+Gateway__ServiceApiKeyHeader=X-Jarvis-Gateway-Key
+
+# User identity. Use X-Jarvis-User-Token if Open WebUI or a reverse proxy forwards the user's IdP JWT.
+Gateway__UserTokenHeader=X-Jarvis-User-Token
+Jwt__Authority=https://login.microsoftonline.us/REPLACE_TENANT_ID/v2.0
+Jwt__Audience=api://jarvis-ai-gateway
+Jwt__RequireHttpsMetadata=true
+
+# Model route examples. Replace model IDs with the actual GovCloud model IDs enabled in your account.
+Gateway__Models__0__Alias=jarvis-govcloud-general
+Gateway__Models__0__DisplayName=Jarvis GovCloud General
+Gateway__Models__0__BedrockModelId=REPLACE_WITH_GOVCLOUD_MODEL_ID
+Gateway__Models__0__Enabled=true
+Gateway__Models__0__ItarApproved=false
+Gateway__Models__0__AllowedGroups__0=AI-General-Users
+Gateway__Models__0__AllowedGroups__1=AI-ITAR-Approved
+Gateway__Models__0__AllowedGroups__2=AI-Jarvis-Evaluators
+Gateway__Models__0__MaxInputCharacters=120000
+Gateway__Models__0__MaxOutputTokens=2048
+
+Gateway__Models__1__Alias=jarvis-govcloud-itar
+Gateway__Models__1__DisplayName=Jarvis GovCloud ITAR Approved
+Gateway__Models__1__BedrockModelId=REPLACE_WITH_ITAR_APPROVED_GOVCLOUD_MODEL_ID
+Gateway__Models__1__Enabled=true
+Gateway__Models__1__ItarApproved=true
+Gateway__Models__1__AllowedGroups__0=AI-ITAR-Approved
+Gateway__Models__1__MaxInputCharacters=120000
+Gateway__Models__1__MaxOutputTokens=2048

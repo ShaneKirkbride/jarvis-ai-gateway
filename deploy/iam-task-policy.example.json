@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowApprovedBedrockModelInvocation",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/REPLACE_WITH_APPROVED_MODEL_ID",
+        "arn:aws-us-gov:bedrock:us-gov-west-1:<ACCOUNT_ID>:inference-profile/REPLACE_WITH_APPROVED_PROFILE_ID"
+      ]
+    },
+    {
+      "Sid": "AllowSecretReadForGatewayRuntime",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:secretsmanager:us-gov-west-1:<ACCOUNT_ID>:secret:jarvis/ai-gateway/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceVpce": "vpce-REPLACE_SECRETS_MANAGER_ENDPOINT"
+        }
+      }
+    },
+    {
+      "Sid": "AllowKmsForGatewaySecretsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:kms:us-gov-west-1:<ACCOUNT_ID>:key/<KEY_ID>"
+      ]
+    }
+  ]
+}
