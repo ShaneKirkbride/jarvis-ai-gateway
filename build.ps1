@@ -1,0 +1,3 @@
+$ErrorActionPreference = "Stop"
+dotnet restore .\src\Jarvis.AiGateway\Jarvis.AiGateway.csproj
+dotnet build .\src\Jarvis.AiGateway\Jarvis.AiGateway.csproj -c Release

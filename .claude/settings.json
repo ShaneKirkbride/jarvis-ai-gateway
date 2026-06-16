@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet restore*)",
+      "Bash(dotnet build*)",
+      "Bash(dotnet test*)",
+      "Bash(dotnet run*)",
+      "Bash(dotnet publish*)",
+      "Bash(dotnet format*)",
+      "Bash(dotnet tool*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git fetch*)",
+      "Bash(git stash list)",
+      "Bash(docker build*)",
+      "Bash(docker run*)",
+      "Bash(docker images*)",
+      "Bash(curl http://localhost*)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git checkout -- *)",
+      "Bash(git clean -f*)",
+      "Bash(git branch -D*)",
+      "Bash(rm -rf*)",
+      "Bash(docker push*)",
+      "Bash(aws*)"
+    ]
+  }
+}

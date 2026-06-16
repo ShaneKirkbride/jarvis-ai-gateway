@@ -1,0 +1,52 @@
+{
+  "_comment": "ECS TASK ROLE policy — attached to the ECS task role (not the execution role). This role is assumed by the running container. See iam-execution-role-policy.example.json for the execution role.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowApprovedBedrockModelInvocation",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/REPLACE_WITH_APPROVED_MODEL_ID",
+        "arn:aws-us-gov:bedrock:us-gov-west-1:<ACCOUNT_ID>:inference-profile/REPLACE_WITH_APPROVED_PROFILE_ID"
+      ]
+    },
+    {
+      "Sid": "AllowBedrockListFoundationModelsForReadinessCheck",
+      "_comment": "OPTIONAL — only required when Gateway__Readiness__CheckBedrockConnectivity=true. Remove this statement if the /readyz connectivity check is disabled (the default).",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ListFoundationModels"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowSecretReadForGatewayRuntime",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:secretsmanager:us-gov-west-1:<ACCOUNT_ID>:secret:jarvis/ai-gateway/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceVpce": "vpce-REPLACE_SECRETS_MANAGER_ENDPOINT"
+        }
+      }
+    },
+    {
+      "Sid": "AllowKmsForGatewaySecretsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:kms:us-gov-west-1:<ACCOUNT_ID>:key/<KEY_ID>"
+      ]
+    }
+  ]
+}

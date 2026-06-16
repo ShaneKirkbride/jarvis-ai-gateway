@@ -1,0 +1,51 @@
+{
+  "_comment": "ECS EXECUTION ROLE policy — attached to the ECS task execution role (ecsTaskExecutionRole or equivalent). This role is assumed by the ECS agent, not the running container. It handles image pulls and log delivery before the task starts. See iam-task-policy.example.json for the task/app role.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowEcrImagePull",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowCloudWatchLogsDelivery",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:logs:us-gov-west-1:<ACCOUNT_ID>:log-group:/ecs/jarvis-ai-gateway:*"
+      ]
+    },
+    {
+      "Sid": "AllowSecretsManagerInjectionAtLaunch",
+      "_comment": "Required only when ECS secret injection (valueFrom in task definition secrets) is used to inject Gateway__ServiceApiKey or JWT secrets at container start time.",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:secretsmanager:us-gov-west-1:<ACCOUNT_ID>:secret:jarvis/ai-gateway/*"
+      ]
+    },
+    {
+      "Sid": "AllowKmsDecryptForSecretInjection",
+      "_comment": "Required only when secrets injected at launch time are encrypted with a customer-managed KMS key.",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:kms:us-gov-west-1:<ACCOUNT_ID>:key/<KEY_ID>"
+      ]
+    }
+  ]
+}
