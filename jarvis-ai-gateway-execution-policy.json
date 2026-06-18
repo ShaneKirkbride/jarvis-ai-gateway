@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadGatewaySecretsForEcsInjection",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/ai-gateway/*"
+      ]
+    },
+    {
+      "Sid": "DecryptGatewaySecretsIfKmsEncrypted",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "secretsmanager.us-gov-west-1.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

@@ -10,6 +10,10 @@ public sealed class GatewayOptions
     public bool RequireServiceApiKey { get; set; }
     public string? ServiceApiKey { get; set; }
     public string ServiceApiKeyHeader { get; set; } = "X-Jarvis-Gateway-Key";
+    // Group display names to assign to the service principal established by ServiceApiKeyMiddleware.
+    // These feed policy group authorization so the M2M caller passes RequiredGroups checks without
+    // bypassing policy.  Configure the groups that match the target models' RequiredGroups.
+    public List<string> ServiceApiKeyGroups { get; set; } = [];
     public string UserTokenHeader { get; set; } = "X-Jarvis-User-Token";
     public List<string> GroupClaimNames { get; set; } = ["groups", "roles", "cognito:groups"];
     public List<string> EmailClaimNames { get; set; } = ["email", "preferred_username", "upn"];

@@ -1,0 +1,15 @@
+{
+  "Statement": [
+    {
+      "Principal": "*",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,193 @@
+{
+    "family":  "jarvis-pilot-openwebui",
+    "taskRoleArn":  "arn:aws-us-gov:iam::660264611488:role/jarvis-pilot-openwebui-task-role",
+    "executionRoleArn":  "arn:aws-us-gov:iam::660264611488:role/jarvis-pilot-openwebui-execution-role",
+    "networkMode":  "awsvpc",
+    "containerDefinitions":  [
+                                 {
+                                     "name":  "openwebui",
+                                     "image":  "660264611488.dkr.ecr.us-gov-west-1.amazonaws.com/jarvis/open-webui:custom-itar-20260617-114011",
+                                     "cpu":  0,
+                                     "links":  [
+
+                                               ],
+                                     "portMappings":  [
+                                                          {
+                                                              "containerPort":  8080,
+                                                              "hostPort":  8080,
+                                                              "protocol":  "tcp"
+                                                          }
+                                                      ],
+                                     "essential":  true,
+                                     "entryPoint":  [
+
+                                                    ],
+                                     "command":  [
+
+                                                 ],
+                                     "environment":  [
+                                                         {
+                                                             "name":  "DATABASE_TYPE",
+                                                             "value":  "postgresql"
+                                                         },
+                                                         {
+                                                             "name":  "DATABASE_NAME",
+                                                             "value":  "openwebui"
+                                                         },
+                                                         {
+                                                             "name":  "WEBUI_URL",
+                                                             "value":  "https://jarvis1.aigov.keysight.com"
+                                                         },
+                                                         {
+                                                             "name":  "ENABLE_LOGIN_FORM",
+                                                             "value":  "true"
+                                                         },
+                                                         {
+                                                             "name":  "DATABASE_HOST",
+                                                             "value":  "jarvis-pilot-openwebui-postgres.ciw6eg6eh9f9.us-gov-west-1.rds.amazonaws.com"
+                                                         },
+                                                         {
+                                                             "name":  "DATABASE_PORT",
+                                                             "value":  "5432"
+                                                         },
+                                                         {
+                                                             "name":  "ENABLE_SIGNUP",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "WEBUI_ADMIN_EMAIL",
+                                                             "value":  "shane.kirkbride@keysight.com"
+                                                         },
+                                                         {
+                                                             "name":  "ENABLE_OLLAMA_API",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "DATABASE_USER",
+                                                             "value":  "openwebui"
+                                                         }
+                                                     ],
+                                     "environmentFiles":  [
+
+                                                          ],
+                                     "mountPoints":  [
+
+                                                     ],
+                                     "volumesFrom":  [
+
+                                                     ],
+                                     "secrets":  [
+                                                     {
+                                                         "name":  "WEBUI_SECRET_KEY",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/pilot/openwebui/webui-secret-key-3ij9UR"
+                                                     },
+                                                     {
+                                                         "name":  "WEBUI_ADMIN_PASSWORD",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/pilot/openwebui/admin-password-Cq79NU"
+                                                     },
+                                                     {
+                                                         "name":  "DATABASE_PASSWORD",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/pilot/openwebui/db-HINUFC:password::"
+                                                     }
+                                                 ],
+                                     "dnsServers":  [
+
+                                                    ],
+                                     "dnsSearchDomains":  [
+
+                                                          ],
+                                     "extraHosts":  [
+
+                                                    ],
+                                     "dockerSecurityOptions":  [
+
+                                                               ],
+                                     "dockerLabels":  {
+
+                                                      },
+                                     "ulimits":  [
+
+                                                 ],
+                                     "logConfiguration":  {
+                                                              "logDriver":  "awslogs",
+                                                              "options":  {
+                                                                              "awslogs-group":  "/jarvis/openwebui",
+                                                                              "awslogs-region":  "us-gov-west-1",
+                                                                              "awslogs-stream-prefix":  "ecs"
+                                                                          },
+                                                              "secretOptions":  [
+
+                                                                                ]
+                                                          },
+                                     "systemControls":  [
+
+                                                        ],
+                                     "credentialSpecs":  [
+
+                                                         ]
+                                 },
+                                 {
+                                     "name":  "gateway-envoy",
+                                     "image":  "660264611488.dkr.ecr.us-gov-west-1.amazonaws.com/jarvis/openwebui-envoy:pilot-v1",
+                                     "essential":  true,
+                                     "portMappings":  [
+                                                          {
+                                                              "containerPort":  18080,
+                                                              "hostPort":  18080,
+                                                              "protocol":  "tcp"
+                                                          }
+                                                      ],
+                                     "environment":  [
+                                                         {
+                                                             "name":  "GATEWAY_HOSTNAME",
+                                                             "value":  "internal-jarvis-pilot-ai-gateway-alb-1081157028.us-gov-west-1.elb.amazonaws.com"
+                                                         },
+                                                         {
+                                                             "name":  "GATEWAY_SNI",
+                                                             "value":  "jarvis-ai-gateway.aigov.keysight.com"
+                                                         }
+                                                     ],
+                                     "secrets":  [
+                                                     {
+                                                         "name":  "CLIENT_CERT_PEM",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/openwebui/envoy/client-cert-pem-V3nxfd"
+                                                     },
+                                                     {
+                                                         "name":  "CLIENT_KEY_PEM",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/openwebui/envoy/client-key-pem-VFFa7H"
+                                                     },
+                                                     {
+                                                         "name":  "GATEWAY_SERVER_CA_PEM",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/openwebui/envoy/gateway-server-ca-pem-2vMi2q"
+                                                     },
+                                                     {
+                                                         "name":  "GATEWAY_SERVICE_KEY",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/ai-gateway/service-api-key-tW3mji"
+                                                     }
+                                                 ],
+                                     "logConfiguration":  {
+                                                              "logDriver":  "awslogs",
+                                                              "options":  {
+                                                                              "awslogs-group":  "/jarvis/openwebui",
+                                                                              "awslogs-region":  "us-gov-west-1",
+                                                                              "awslogs-stream-prefix":  "envoy"
+                                                                          }
+                                                          }
+                                 }
+                             ],
+    "volumes":  [
+
+                ],
+    "placementConstraints":  [
+
+                             ],
+    "requiresCompatibilities":  [
+                                    "FARGATE"
+                                ],
+    "cpu":  "2048",
+    "memory":  "4096",
+    "runtimePlatform":  {
+                            "cpuArchitecture":  "X86_64",
+                            "operatingSystemFamily":  "LINUX"
+                        }
+}

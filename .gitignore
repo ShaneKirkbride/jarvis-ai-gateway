@@ -432,3 +432,6 @@ FodyWeavers.xsd
 # Shared team files (CLAUDE.md, .claude/settings.json, .claude/commands/, .claude/rules/, .claude/skills/, .claude/agents/) are committed.
 CLAUDE.local.md
 .claude/settings.local.json
+
+# Local mTLS smoke-test certs - do not commit
+mtls-certs/

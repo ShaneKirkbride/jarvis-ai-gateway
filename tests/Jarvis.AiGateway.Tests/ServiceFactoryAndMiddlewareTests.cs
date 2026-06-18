@@ -129,6 +129,70 @@ public sealed class ServiceFactoryAndMiddlewareTests
 
         Assert.Equal(StatusCodes.Status500InternalServerError, missingConfig.Response.StatusCode);
         Assert.Equal(StatusCodes.Status401Unauthorized, invalid.Response.StatusCode);
+        Assert.False(invalid.User.Identity?.IsAuthenticated ?? false);
+    }
+
+    [Fact]
+    public async Task Service_api_key_middleware_establishes_authenticated_service_principal_on_valid_key()
+    {
+        var valid = ContextForPath("/v1/models");
+        valid.Request.Headers["X-Jarvis-Gateway-Key"] = "secret";
+        var nextRan = false;
+
+        await new ServiceApiKeyMiddleware(
+            _ => { nextRan = true; return Task.CompletedTask; },
+            MsOptions.Create(new GatewayOptions { RequireServiceApiKey = true, ServiceApiKey = "secret" }))
+            .InvokeAsync(valid);
+
+        Assert.True(nextRan);
+        Assert.True(valid.User.Identity?.IsAuthenticated);
+        Assert.Equal(ServiceApiKeyMiddleware.AuthenticationScheme, valid.User.Identity?.AuthenticationType);
+        Assert.Equal("openwebui-service", valid.User.FindFirstValue(ClaimTypes.NameIdentifier));
+        Assert.Equal("OpenWebUI Service", valid.User.FindFirstValue(ClaimTypes.Name));
+        Assert.Equal("service_api_key", valid.User.FindFirstValue(ServiceApiKeyMiddleware.AuthTypeClaimType));
+    }
+
+    [Fact]
+    public async Task Service_api_key_middleware_with_configured_groups_emits_group_name_claims()
+    {
+        var valid = ContextForPath("/v1/models");
+        valid.Request.Headers["X-Jarvis-Gateway-Key"] = "test-key-12345";
+        var options = new GatewayOptions
+        {
+            RequireServiceApiKey = true,
+            ServiceApiKey = "test-key-12345",
+            ServiceApiKeyGroups = ["AI-ITAR-Approved", "AI-General-Users"]
+        };
+
+        await new ServiceApiKeyMiddleware(_ => Task.CompletedTask, MsOptions.Create(options)).InvokeAsync(valid);
+
+        var groupClaims = valid.User.FindAll(IdentityBrokerMiddleware.GroupNameClaim).Select(c => c.Value).ToList();
+        Assert.Contains("AI-ITAR-Approved", groupClaims);
+        Assert.Contains("AI-General-Users", groupClaims);
+    }
+
+    [Fact]
+    public async Task Service_api_key_middleware_with_no_groups_emits_no_group_name_claims()
+    {
+        var valid = ContextForPath("/v1/models");
+        valid.Request.Headers["X-Jarvis-Gateway-Key"] = "test-key-12345";
+
+        await new ServiceApiKeyMiddleware(_ => Task.CompletedTask, MsOptions.Create(new GatewayOptions { RequireServiceApiKey = true, ServiceApiKey = "test-key-12345" })).InvokeAsync(valid);
+
+        Assert.Empty(valid.User.FindAll(IdentityBrokerMiddleware.GroupNameClaim));
+    }
+
+    [Fact]
+    public void User_context_factory_reads_service_principal_groups_via_group_name_claim()
+    {
+        var principal = ServiceApiKeyMiddleware.CreateServicePrincipal(["AI-ITAR-Approved", "AI-General-Users"]);
+        var factory = new UserContextFactory(MsOptions.Create(new GatewayOptions()));
+
+        var user = factory.Create(principal);
+
+        Assert.Contains("AI-ITAR-Approved", user.Groups);
+        Assert.Contains("AI-General-Users", user.Groups);
+        Assert.Equal(ServiceApiKeyMiddleware.ServiceSubject, user.Subject);
     }
 
     [Fact]

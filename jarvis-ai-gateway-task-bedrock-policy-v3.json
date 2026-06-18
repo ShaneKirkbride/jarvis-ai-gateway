@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InvokeBedrockRuntime",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
+      ],
+      "Resource": [
+        "arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/*",
+        "arn:aws-us-gov:bedrock:us-gov-west-1:660264611488:inference-profile/*",
+        "arn:aws-us-gov:bedrock:us-gov-west-1:660264611488:application-inference-profile/*"
+      ]
+    },
+    {
+      "Sid": "ListBedrockModelsForReadiness",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel",
+        "bedrock:GetFoundationModelAvailability"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
