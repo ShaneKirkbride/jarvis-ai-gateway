@@ -177,6 +177,11 @@ public sealed class OpenWebUiContractTests : IClassFixture<OpenWebUiContractTest
                 services.AddSingleton<IAuthenticationSchemeProvider, TestSchemeProvider>();
                 services.RemoveAll<IBedrockInvocationStrategy>();
                 services.AddSingleton<IBedrockInvocationStrategy, FakeStrategy>();
+                // No streaming strategy is registered for these contract tests, so a stream=true
+                // request deterministically takes the non-streaming fallback path (the gateway's
+                // Development config sets Streaming:FallbackToNonStreaming=true). Real streaming
+                // behaviour is covered by StreamingChatCompletionTests.
+                services.RemoveAll<IBedrockStreamingStrategy>();
                 services.AddSingleton<IAuditLogger, InMemoryAuditLogger>();
                 // The broker is opt-out via Gateway:IdentityBroker:Enabled=false above, but
                 // Program.cs captures that flag synchronously before WebApplicationFactory's

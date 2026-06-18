@@ -142,10 +142,10 @@ public sealed class OpenAiChatRequestValidator : IOpenAiChatRequestValidator
             errors.Add(new("max_tokens_exceeds_model_limit", $"The 'max_tokens' field exceeds the configured maximum of {resolvedModel.MaxOutputTokens} for model '{resolvedModel.Id}'.", "max_tokens"));
         }
 
-        if (request.Stream && !_options.Streaming.FallbackToNonStreaming)
-        {
-            errors.Add(new("streaming_disabled", "Streaming responses are disabled until Bedrock ConverseStream is implemented. Send stream=false.", "stream"));
-        }
+        // Note: stream=true is no longer rejected here. Streaming is fully supported; whether a
+        // streamed request is served as SSE, falls back to a single non-streaming completion, or
+        // is rejected is decided in ChatCompletionOrchestrator after policy authorization, so a
+        // policy denial still returns its 403 before any stream is opened.
 
         var stopSequences = GetStopSequences(request.Stop, errors);
         var metadata = GetMetadata(request.Metadata, errors);

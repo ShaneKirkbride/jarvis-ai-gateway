@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Amazon.BedrockRuntime;
@@ -13,6 +14,23 @@ public interface IBedrockInvocationStrategy
     string Name { get; }
     bool CanHandle(GatewayModel model, AiChatRequest request);
     Task<AiChatResult> InvokeAsync(
+        GatewayModel model,
+        AiChatRequest request,
+        RequestContext context,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Streaming counterpart to <see cref="IBedrockInvocationStrategy"/>.  Yields provider-neutral
+/// <see cref="AiChatStreamEvent"/>s as the model produces tokens.  Implementations must apply
+/// the same inbound redaction, request mapping, and endpoint configuration as the non-streaming
+/// path — only the transport (ConverseStream vs Converse) differs.
+/// </summary>
+public interface IBedrockStreamingStrategy
+{
+    string Name { get; }
+    bool CanHandle(GatewayModel model, AiChatRequest request);
+    IAsyncEnumerable<AiChatStreamEvent> StreamAsync(
         GatewayModel model,
         AiChatRequest request,
         RequestContext context,
@@ -46,13 +64,67 @@ public sealed class BedrockConverseInvocationStrategy(
         RequestContext context,
         CancellationToken cancellationToken)
     {
+        var components = ConverseRequestComponents.Build(model, request, context, _options, redactor);
+        if (components.Messages.Count == 0)
+        {
+            throw new InvalidOperationException("At least one non-system message is required.");
+        }
+
+        var bedrockRequest = new ConverseRequest
+        {
+            ModelId = model.BedrockModelId,
+            Messages = components.Messages,
+            InferenceConfig = components.Inference,
+            RequestMetadata = components.Metadata
+        };
+
+        if (components.System.Count > 0)
+        {
+            bedrockRequest.System = components.System;
+        }
+
+        logger.LogInformation("Invoking Bedrock Converse for model {ModelId} ({Alias}).", model.BedrockModelId, model.Alias);
+        var providerStopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var response = await bedrockRuntime.ConverseAsync(bedrockRequest, cancellationToken);
+        providerStopwatch.Stop();
+        var responseText = response.Output?.Message?.Content?
+            .Where(c => !string.IsNullOrEmpty(c.Text))
+            .Select(c => c.Text)
+            .DefaultIfEmpty(string.Empty)
+            .Aggregate((a, b) => a + b) ?? string.Empty;
+
+        return new AiChatResult(responseText, new Jarvis.AiGateway.Models.TokenUsage(response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0), response.StopReason?.Value ?? "stop", new ProviderInvocationMetadata(model.ProviderName, Name, providerStopwatch.ElapsedMilliseconds, response.ResponseMetadata?.RequestId));
+    }
+}
+
+/// <summary>
+/// Shared builder so the Converse and ConverseStream paths produce byte-identical request
+/// components (messages, system blocks, inference config, request metadata) and apply the
+/// same inbound redaction rules.  Keeping this in one place guarantees a streamed request is
+/// mapped exactly like its non-streaming equivalent.
+/// </summary>
+internal static class ConverseRequestComponents
+{
+    public readonly record struct Result(
+        List<SystemContentBlock> System,
+        List<Message> Messages,
+        InferenceConfiguration Inference,
+        Dictionary<string, string> Metadata);
+
+    public static Result Build(
+        GatewayModel model,
+        AiChatRequest request,
+        RequestContext context,
+        GatewayOptions options,
+        IContentRedactor redactor)
+    {
         var systemBlocks = new List<SystemContentBlock>();
         var messages = new List<Message>();
 
         // Redact if configured globally OR if ITAR mode is active.
         // ITAR requests must always be redacted before leaving the gateway boundary,
         // regardless of the Gateway:Redaction:RedactBeforeBedrock setting.
-        var redactForThisRequest = _options.Redaction.RedactBeforeBedrock
+        var redactForThisRequest = options.Redaction.RedactBeforeBedrock
             || context.ItarMode
             || DataLabelClassifier.IsItar(context.DataLabel);
 
@@ -79,11 +151,6 @@ public sealed class BedrockConverseInvocationStrategy(
             });
         }
 
-        if (messages.Count == 0)
-        {
-            throw new InvalidOperationException("At least one non-system message is required.");
-        }
-
         var inferenceConfig = new InferenceConfiguration
         {
             MaxTokens = Math.Min(request.Options.MaxTokens ?? model.MaxOutputTokens, model.MaxOutputTokens),
@@ -96,39 +163,94 @@ public sealed class BedrockConverseInvocationStrategy(
             inferenceConfig.StopSequences.Add(stop);
         }
 
-        var bedrockRequest = new ConverseRequest
+        var metadata = new Dictionary<string, string>
         {
-            ModelId = model.BedrockModelId,
-            Messages = messages,
-            InferenceConfig = inferenceConfig,
-            RequestMetadata = new Dictionary<string, string>
-            {
-                ["gateway"] = _options.ServiceName,
-                ["environment"] = _options.EnvironmentName,
-                ["requestId"] = context.RequestId,
-                ["correlationId"] = context.CorrelationId,
-                ["workspaceId"] = context.WorkspaceId,
-                ["dataLabel"] = context.DataLabel,
-                ["modelAlias"] = model.Alias
-            }
+            ["gateway"] = options.ServiceName,
+            ["environment"] = options.EnvironmentName,
+            ["requestId"] = context.RequestId,
+            ["correlationId"] = context.CorrelationId,
+            ["workspaceId"] = context.WorkspaceId,
+            ["dataLabel"] = context.DataLabel,
+            ["modelAlias"] = model.Alias
         };
 
-        if (systemBlocks.Count > 0)
+        return new Result(systemBlocks, messages, inferenceConfig, metadata);
+    }
+}
+
+/// <summary>
+/// Streaming counterpart of <see cref="BedrockConverseInvocationStrategy"/>.  Calls Bedrock
+/// ConverseStream and adapts the provider event stream (message start, content-block deltas,
+/// message stop, metadata) into provider-neutral <see cref="AiChatStreamEvent"/>s, surfacing
+/// only text deltas plus a single terminal completion event.  Uses the shared
+/// <see cref="ConverseRequestComponents"/> builder so the request is mapped identically to the
+/// non-streaming Converse path, including ITAR/global inbound redaction.
+/// </summary>
+public sealed class BedrockConverseStreamInvocationStrategy(
+    IAmazonBedrockRuntime bedrockRuntime,
+    IContentRedactor redactor,
+    IOptions<GatewayOptions> gatewayOptions,
+    ILogger<BedrockConverseStreamInvocationStrategy> logger) : IBedrockStreamingStrategy
+{
+    private readonly GatewayOptions _options = gatewayOptions.Value;
+    public string Name => "converse-stream";
+
+    public bool CanHandle(GatewayModel model, AiChatRequest request)
+    {
+        return model.SupportsConverse && !model.InvocationMode.Equals("InvokeModel", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async IAsyncEnumerable<AiChatStreamEvent> StreamAsync(
+        GatewayModel model,
+        AiChatRequest request,
+        RequestContext context,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var components = ConverseRequestComponents.Build(model, request, context, _options, redactor);
+        if (components.Messages.Count == 0)
         {
-            bedrockRequest.System = systemBlocks;
+            throw new InvalidOperationException("At least one non-system message is required.");
         }
 
-        logger.LogInformation("Invoking Bedrock Converse for model {ModelId} ({Alias}).", model.BedrockModelId, model.Alias);
-        var providerStopwatch = System.Diagnostics.Stopwatch.StartNew();
-        var response = await bedrockRuntime.ConverseAsync(bedrockRequest, cancellationToken);
-        providerStopwatch.Stop();
-        var responseText = response.Output?.Message?.Content?
-            .Where(c => !string.IsNullOrEmpty(c.Text))
-            .Select(c => c.Text)
-            .DefaultIfEmpty(string.Empty)
-            .Aggregate((a, b) => a + b) ?? string.Empty;
+        var bedrockRequest = new ConverseStreamRequest
+        {
+            ModelId = model.BedrockModelId,
+            Messages = components.Messages,
+            InferenceConfig = components.Inference,
+            RequestMetadata = components.Metadata
+        };
 
-        return new AiChatResult(responseText, new Jarvis.AiGateway.Models.TokenUsage(response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0), response.StopReason?.Value ?? "stop", new ProviderInvocationMetadata(model.ProviderName, Name, providerStopwatch.ElapsedMilliseconds, response.ResponseMetadata?.RequestId));
+        if (components.System.Count > 0)
+        {
+            bedrockRequest.System = components.System;
+        }
+
+        logger.LogInformation("Invoking Bedrock ConverseStream for model {ModelId} ({Alias}).", model.BedrockModelId, model.Alias);
+        var response = await bedrockRuntime.ConverseStreamAsync(bedrockRequest, cancellationToken);
+
+        var finishReason = "stop";
+        Jarvis.AiGateway.Models.TokenUsage? usage = null;
+
+        await foreach (var streamEvent in response.Stream.WithCancellation(cancellationToken))
+        {
+            switch (streamEvent)
+            {
+                case ContentBlockDeltaEvent delta when !string.IsNullOrEmpty(delta.Delta?.Text):
+                    yield return new AiChatTextDeltaEvent(delta.Delta.Text);
+                    break;
+                case MessageStopEvent stop when !string.IsNullOrWhiteSpace(stop.StopReason?.Value):
+                    finishReason = stop.StopReason.Value;
+                    break;
+                case ConverseStreamMetadataEvent metadata when metadata.Usage is not null:
+                    usage = new Jarvis.AiGateway.Models.TokenUsage(
+                        metadata.Usage.InputTokens ?? 0,
+                        metadata.Usage.OutputTokens ?? 0,
+                        metadata.Usage.TotalTokens ?? 0);
+                    break;
+            }
+        }
+
+        yield return new AiChatCompletionEvent(finishReason, usage);
     }
 }
 

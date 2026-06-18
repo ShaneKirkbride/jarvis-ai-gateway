@@ -18,6 +18,7 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
     private readonly IOpenAiChatRequestValidator validator;
     private readonly IPolicyEngine policyEngine;
     private readonly IEnumerable<IBedrockInvocationStrategy> strategies;
+    private readonly IEnumerable<IBedrockStreamingStrategy> streamingStrategies;
     private readonly IContentRedactor redactor;
     private readonly IAuditLogger auditLogger;
     private readonly IOpenAiErrorMapper errorMapper;
@@ -26,6 +27,8 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
     private readonly ResiliencePipeline _resilience;
 
     // Convenience constructor for tests (no metrics, no custom resilience pipeline).
+    // streamingStrategies is optional so existing call sites that exercise the non-streaming
+    // path do not need to supply one.
     public ChatCompletionOrchestrator(
         IUserContextFactory userContextFactory,
         IRequestContextFactory requestContextFactory,
@@ -35,8 +38,9 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
         IContentRedactor redactor,
         IAuditLogger auditLogger,
         IOpenAiErrorMapper errorMapper,
-        IOptions<GatewayOptions> options)
-        : this(userContextFactory, requestContextFactory, validator, policyEngine, strategies, redactor, auditLogger, errorMapper, new NoOpGatewayMetrics(), options, new ResiliencePipelineBuilder().Build())
+        IOptions<GatewayOptions> options,
+        IEnumerable<IBedrockStreamingStrategy>? streamingStrategies = null)
+        : this(userContextFactory, requestContextFactory, validator, policyEngine, strategies, redactor, auditLogger, errorMapper, new NoOpGatewayMetrics(), options, new ResiliencePipelineBuilder().Build(), streamingStrategies ?? [])
     {
     }
 
@@ -52,13 +56,15 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
         IOpenAiErrorMapper errorMapper,
         IGatewayMetrics metrics,
         IOptions<GatewayOptions> options,
-        ResiliencePipeline resilience)
+        ResiliencePipeline resilience,
+        IEnumerable<IBedrockStreamingStrategy> streamingStrategies)
     {
         this.userContextFactory = userContextFactory;
         this.requestContextFactory = requestContextFactory;
         this.validator = validator;
         this.policyEngine = policyEngine;
         this.strategies = strategies;
+        this.streamingStrategies = streamingStrategies;
         this.redactor = redactor;
         this.auditLogger = auditLogger;
         this.errorMapper = errorMapper;
@@ -83,13 +89,6 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
                 return WriteMapped(audit, stopwatch, errorMapper.MapValidation(validation));
             }
 
-            if (request.Stream && !_options.Streaming.FallbackToNonStreaming)
-            {
-                var streamValidation = OpenAiChatValidationResult.Failure(new OpenAiValidationError("streaming_unsupported", "Streaming responses are not implemented by this gateway.", "stream"));
-                metrics.RecordPolicyDenial(streamValidation.Code ?? "streaming_unsupported", request.Model ?? string.Empty);
-                return WriteMapped(audit, stopwatch, errorMapper.MapValidation(streamValidation));
-            }
-
             var promptText = string.Join("\n", validation.AiRequest.Messages.Select(m => m.Content));
             var logRedaction = _options.Redaction.RedactBeforeLogging ? redactor.Redact(promptText) : new RedactionResult(promptText, 0);
             audit.RedactionCount = logRedaction.RedactionCount;
@@ -108,6 +107,40 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
             {
                 metrics.RecordPolicyDenial(validation.Code ?? "validation_error", request.Model ?? string.Empty);
                 return WriteMapped(audit, stopwatch, errorMapper.MapValidation(validation));
+            }
+
+            // Streaming is decided here — after authentication, policy authorization, and model
+            // resolution — so a policy denial still returns 403 before any stream is opened.
+            if (validation.AiRequest.Stream)
+            {
+                var streamingStrategy = streamingStrategies.FirstOrDefault(s => s.CanHandle(decision.Model, validation.AiRequest));
+                if (streamingStrategy is not null)
+                {
+                    audit.InvocationStrategy = streamingStrategy.Name;
+                    metrics.RecordRequest(request.Model ?? string.Empty);
+                    return new OpenAiSseStreamResult(
+                        streamingStrategy,
+                        decision.Model,
+                        validation.AiRequest,
+                        requestContext,
+                        request.Model ?? string.Empty,
+                        audit,
+                        auditLogger,
+                        errorMapper,
+                        metrics,
+                        redactor,
+                        _options,
+                        stopwatch);
+                }
+
+                // No streaming-capable adapter for this model.  Either fall back to a single
+                // non-streaming completion (backwards-compatible behaviour) or reject.
+                if (!_options.Streaming.FallbackToNonStreaming)
+                {
+                    var streamValidation = OpenAiChatValidationResult.Failure(new OpenAiValidationError("streaming_not_supported", "Streaming is not supported for the requested model.", "stream"));
+                    metrics.RecordPolicyDenial(streamValidation.Code ?? "streaming_not_supported", request.Model ?? string.Empty);
+                    return WriteMapped(audit, stopwatch, errorMapper.MapValidation(streamValidation));
+                }
             }
 
             var orderedStrategies = strategies.OrderBy(s => s is BedrockConverseInvocationStrategy ? 0 : 1).ToArray();

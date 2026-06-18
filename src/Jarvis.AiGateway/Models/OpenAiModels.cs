@@ -192,6 +192,53 @@ public sealed class OpenAiUsage
     public int TotalTokens { get; set; }
 }
 
+// ── Streaming (SSE) chunk shapes ────────────────────────────────────────────────
+// Mirrors OpenAI's chat.completion.chunk schema.  Each chunk is serialized and written as
+// a `data: {json}\n\n` Server-Sent Event.  Open WebUI depends on this shape; do not rename
+// or remove these fields.  finish_reason is intentionally written even when null so the
+// shape matches OpenAI exactly; role/content are omitted when null to keep the empty
+// terminal delta as `{}`.
+public sealed class OpenAiChatCompletionChunk
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("object")]
+    public string Object { get; set; } = "chat.completion.chunk";
+
+    [JsonPropertyName("created")]
+    public long Created { get; set; }
+
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = string.Empty;
+
+    [JsonPropertyName("choices")]
+    public List<OpenAiChunkChoice> Choices { get; set; } = [];
+}
+
+public sealed class OpenAiChunkChoice
+{
+    [JsonPropertyName("index")]
+    public int Index { get; set; }
+
+    [JsonPropertyName("delta")]
+    public OpenAiChunkDelta Delta { get; set; } = new();
+
+    [JsonPropertyName("finish_reason")]
+    public string? FinishReason { get; set; }
+}
+
+public sealed class OpenAiChunkDelta
+{
+    [JsonPropertyName("role")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Role { get; set; }
+
+    [JsonPropertyName("content")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Content { get; set; }
+}
+
 public sealed class OpenAiErrorResponse
 {
     [JsonPropertyName("error")]

@@ -28,3 +28,20 @@ public sealed record ProviderInvocationMetadata(
     string InvocationStrategy,
     long LatencyMs,
     string? ProviderRequestId = null);
+
+// ── Streaming events ────────────────────────────────────────────────────────────
+// Provider-neutral events emitted by an IBedrockStreamingStrategy and translated into
+// OpenAI-compatible SSE chunks by OpenAiSseStreamResult.  Only text deltas and a single
+// terminal completion event are surfaced; provider-specific event framing (message start,
+// content-block start/stop, etc.) is collapsed away inside the strategy.
+public abstract record AiChatStreamEvent;
+
+/// <summary>A single incremental text fragment from the model.</summary>
+public sealed record AiChatTextDeltaEvent(string Text) : AiChatStreamEvent;
+
+/// <summary>
+/// Terminal event for the stream.  <paramref name="FinishReason"/> is the raw provider stop
+/// reason (mapped to an OpenAI finish_reason downstream).  <paramref name="Usage"/> is null
+/// when the provider did not report token counts for the stream.
+/// </summary>
+public sealed record AiChatCompletionEvent(string FinishReason, TokenUsage? Usage) : AiChatStreamEvent;

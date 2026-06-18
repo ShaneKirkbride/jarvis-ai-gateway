@@ -67,16 +67,21 @@ public sealed class OpenAiChatRequestValidatorTests
         Assert.True((await Validator().ValidateAsync(Request("valid", stop: Json((string?)null)), CancellationToken.None)).IsValid);
         Assert.True((await Validator().ValidateAsync(Request("missing-model", maxTokens: 11), CancellationToken.None)).IsValid);
         await AssertInvalid(Request("valid", metadata: new Dictionary<string, JsonElement> { ["large"] = Json(new string('x', 9000)) }), "metadata_too_large");
-        await AssertInvalid(Request("valid", stream: true), "streaming_disabled");
     }
 
     [Fact]
-    public async Task Validator_allows_stream_when_fallback_is_explicitly_enabled()
+    public async Task Validator_accepts_stream_regardless_of_fallback_setting()
     {
-        var validator = Validator(new GatewayOptions { Streaming = new StreamingOptions { FallbackToNonStreaming = true } });
-        var result = await validator.ValidateAsync(Request("valid", stream: true), CancellationToken.None);
+        // Streaming is fully supported now, so the validator no longer rejects stream=true.
+        // Whether a streamed request is served as SSE, falls back, or is rejected is decided in
+        // ChatCompletionOrchestrator after policy authorization — not here.
+        var fallbackOff = await Validator(new GatewayOptions { Streaming = new StreamingOptions { FallbackToNonStreaming = false } })
+            .ValidateAsync(Request("valid", stream: true), CancellationToken.None);
+        var fallbackOn = await Validator(new GatewayOptions { Streaming = new StreamingOptions { FallbackToNonStreaming = true } })
+            .ValidateAsync(Request("valid", stream: true), CancellationToken.None);
 
-        Assert.True(result.IsValid);
+        Assert.True(fallbackOff.IsValid);
+        Assert.True(fallbackOn.IsValid);
     }
 
     [Fact]

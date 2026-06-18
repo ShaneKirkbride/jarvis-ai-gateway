@@ -254,6 +254,7 @@ builder.Services.AddSingleton<IReadinessCheck, GatewayReadinessCheck>();
 builder.Services.AddSingleton<IGatewayMetrics, GatewayMetrics>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockConverseInvocationStrategy>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockInvokeModelTextInvocationStrategy>();
+builder.Services.AddSingleton<IBedrockStreamingStrategy, BedrockConverseStreamInvocationStrategy>();
 builder.Services.AddSingleton<IAuditLogger, AuditLogger>();
 
 var app = builder.Build();
