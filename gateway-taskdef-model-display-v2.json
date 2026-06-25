@@ -1,0 +1,141 @@
+{
+    "family":  "jarvis-ai-gateway",
+    "taskRoleArn":  "arn:aws-us-gov:iam::660264611488:role/JarvisAiGatewayTaskRole",
+    "executionRoleArn":  "arn:aws-us-gov:iam::660264611488:role/JarvisAiGatewayExecutionRole",
+    "networkMode":  "awsvpc",
+    "containerDefinitions":  [
+                                 {
+                                     "name":  "jarvis-ai-gateway",
+                                     "image":  "660264611488.dkr.ecr.us-gov-west-1.amazonaws.com/jarvis/ai-gateway:pilot-v3",
+                                     "cpu":  0,
+                                     "portMappings":  [
+                                                          {
+                                                              "containerPort":  8080,
+                                                              "hostPort":  8080,
+                                                              "protocol":  "tcp"
+                                                          }
+                                                      ],
+                                     "essential":  true,
+                                     "environment":  [
+                                                         {
+                                                             "name":  "Gateway__RequireServiceApiKey",
+                                                             "value":  "true"
+                                                         },
+                                                         {
+                                                             "name":  "ASPNETCORE_ENVIRONMENT",
+                                                             "value":  "Production"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__ModelDiscovery__Enabled",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__BedrockRuntimeEndpointDns",
+                                                             "value":  "vpce-0c68ba79922949b67-2j4lh18x.bedrock-runtime.us-gov-west-1.vpce.amazonaws.com"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__IdentityBroker__OwuiSessionJwt__Enabled",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__ServiceApiKeyGroups__1",
+                                                             "value":  "AI-General-Users"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__ServiceApiKeyGroups__0",
+                                                             "value":  "AI-ITAR-Approved"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__EnvironmentName",
+                                                             "value":  "GovCloudSmoke"
+                                                         },
+                                                         {
+                                                             "name":  "ASPNETCORE_URLS",
+                                                             "value":  "http://+:8080"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Redaction__RedactBeforeBedrock",
+                                                             "value":  "true"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__IdentityBroker__OwuiTrustedHeader__Enabled",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Streaming__FallbackToNonStreaming",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__AwsRegion",
+                                                             "value":  "us-gov-west-1"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__IdentityBroker__Enabled",
+                                                             "value":  "false"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__ServiceApiKeyHeader",
+                                                             "value":  "X-Jarvis-Gateway-Key"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Models__0__Alias",
+                                                             "value":  "openai.gpt-oss-120b-1:0"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Models__0__DisplayName",
+                                                             "value":  "OpenAI gpt-oss-120b - AWS Bedrock GovCloud - ITAR Approved"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Models__0__BedrockModelId",
+                                                             "value":  "openai.gpt-oss-120b-1:0"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Models__0__Enabled",
+                                                             "value":  "true"
+                                                         },
+                                                         {
+                                                             "name":  "Gateway__Models__0__ItarApproved",
+                                                             "value":  "true"
+                                                         }
+                                                     ],
+                                     "mountPoints":  [
+
+                                                     ],
+                                     "volumesFrom":  [
+
+                                                     ],
+                                     "secrets":  [
+                                                     {
+                                                         "name":  "Gateway__ServiceApiKey",
+                                                         "valueFrom":  "arn:aws-us-gov:secretsmanager:us-gov-west-1:660264611488:secret:jarvis/ai-gateway/service-api-key-tW3mji"
+                                                     }
+                                                 ],
+                                     "logConfiguration":  {
+                                                              "logDriver":  "awslogs",
+                                                              "options":  {
+                                                                              "awslogs-group":  "/ecs/jarvis-ai-gateway",
+                                                                              "awslogs-region":  "us-gov-west-1",
+                                                                              "awslogs-stream-prefix":  "ecs"
+                                                                          }
+                                                          },
+                                     "systemControls":  [
+
+                                                        ]
+                                 }
+                             ],
+    "volumes":  [
+
+                ],
+    "placementConstraints":  [
+
+                             ],
+    "requiresCompatibilities":  [
+                                    "FARGATE"
+                                ],
+    "cpu":  "512",
+    "memory":  "1024",
+    "runtimePlatform":  {
+                            "cpuArchitecture":  "X86_64",
+                            "operatingSystemFamily":  "LINUX"
+                        }
+}

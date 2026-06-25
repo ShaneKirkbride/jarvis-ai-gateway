@@ -78,6 +78,7 @@ public sealed class ServiceApiKeyAuthIntegrationTests : IClassFixture<ServiceApi
             builder.UseEnvironment("Development");
             builder.ConfigureAppConfiguration((_, config) =>
             {
+                TestConfig.RemoveJsonSources(config);
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     // JwtBearer is registered (broker off) but never contacts the authority:
@@ -204,6 +205,7 @@ public sealed class ServiceApiKeyGroupPolicyTests : IClassFixture<ServiceApiKeyG
             builder.UseEnvironment("Development");
             builder.ConfigureAppConfiguration((_, config) =>
             {
+                TestConfig.RemoveJsonSources(config);
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["Jwt:Authority"] = "https://issuer.example.test/",

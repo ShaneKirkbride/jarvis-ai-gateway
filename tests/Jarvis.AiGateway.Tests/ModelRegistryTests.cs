@@ -77,6 +77,36 @@ public sealed class ModelRegistryTests
         Assert.Equal("meta.llama3-8b-instruct-v1:0", models[0].Id);
     }
 
+    [Fact]
+    public async Task Azure_configured_alias_resolves_without_bedrock_discovery()
+    {
+        var options = new GatewayOptions
+        {
+            Models =
+            [
+                new ModelRouteOptions
+                {
+                    Alias = "jarvis2-chat",
+                    ProviderName = "azure-openai",
+                    AzureDeploymentName = "jarvis2-chat",
+                    Enabled = true,
+                    RequiredGroups = ["AI-General-Users"]
+                }
+            ]
+        };
+        // No discovered Bedrock models are supplied: proves azure-openai aliases do not depend on
+        // Bedrock discovery to appear in the registry.
+        var registry = CreateRegistry(options);
+
+        var models = await registry.GetChatModelsAsync(CancellationToken.None);
+
+        var model = Assert.Single(models);
+        Assert.Equal("jarvis2-chat", model.Id);
+        Assert.Equal("azure-openai", model.ProviderName);
+        Assert.Equal("jarvis2-chat", model.AzureDeploymentName);
+        Assert.Equal(string.Empty, model.BedrockModelId);
+    }
+
     private static ModelRegistry CreateRegistry(GatewayOptions options, params DiscoveredBedrockModel[] discovered)
     {
         return new ModelRegistry(

@@ -23,11 +23,23 @@ public sealed class OpenAiChatCompletionRequest
     [JsonPropertyName("max_tokens")]
     public int? MaxTokens { get; set; }
 
+    // GPT-5.x deployments reject max_tokens and require this instead. Preserved when supplied.
+    [JsonPropertyName("max_completion_tokens")]
+    public int? MaxCompletionTokens { get; set; }
+
     [JsonPropertyName("stop")]
     public JsonElement? Stop { get; set; }
 
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; set; }
+
+    // Tool/function calling (Phase 1). Capability-gated: accepted only for models advertising
+    // supports_tools; rejected otherwise (the text-only default is unchanged for non-tool models).
+    [JsonPropertyName("tools")]
+    public List<OpenAiTool>? Tools { get; set; }
+
+    [JsonPropertyName("tool_choice")]
+    public JsonElement? ToolChoice { get; set; }
 }
 
 public sealed class OpenAiMessage
@@ -37,6 +49,14 @@ public sealed class OpenAiMessage
 
     [JsonPropertyName("content")]
     public JsonElement Content { get; set; }
+
+    // Present on an assistant message that requested tool calls.
+    [JsonPropertyName("tool_calls")]
+    public List<OpenAiToolCall>? ToolCalls { get; set; }
+
+    // Present on a "tool" role message carrying a tool result back to the model.
+    [JsonPropertyName("tool_call_id")]
+    public string? ToolCallId { get; set; }
 
     public bool TryGetTextContent(out string text, out string? error)
     {
@@ -136,6 +156,47 @@ public sealed class OpenAiModelInfo
 
     [JsonPropertyName("owned_by")]
     public string OwnedBy { get; set; } = "jarvis-ai-gateway";
+
+    // ── Additive capability metadata ────────────────────────────────────────────────
+    // Extra fields beyond the OpenAI model object. OpenAI/Open WebUI clients ignore unknown
+    // fields, so the base list shape is preserved; IDE clients can read these to adapt UX.
+
+    [JsonPropertyName("provider")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Provider { get; set; }
+
+    [JsonPropertyName("display_name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DisplayName { get; set; }
+
+    [JsonPropertyName("supports_chat")]
+    public bool SupportsChat { get; set; }
+
+    [JsonPropertyName("supports_streaming")]
+    public bool SupportsStreaming { get; set; }
+
+    [JsonPropertyName("supports_tools")]
+    public bool SupportsTools { get; set; }
+
+    [JsonPropertyName("supports_embeddings")]
+    public bool SupportsEmbeddings { get; set; }
+
+    [JsonPropertyName("supports_fim")]
+    public bool SupportsFim { get; set; }
+
+    [JsonPropertyName("supports_vision")]
+    public bool SupportsVision { get; set; }
+
+    [JsonPropertyName("context_window")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? ContextWindow { get; set; }
+
+    [JsonPropertyName("max_output_tokens")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? MaxOutputTokens { get; set; }
+
+    [JsonPropertyName("approved_for_itar")]
+    public bool ApprovedForItar { get; set; }
 }
 
 public sealed class OpenAiChatCompletionResponse
@@ -178,6 +239,55 @@ public sealed class OpenAiAssistantMessage
 
     [JsonPropertyName("content")]
     public string Content { get; set; } = string.Empty;
+
+    [JsonPropertyName("tool_calls")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<OpenAiToolCall>? ToolCalls { get; set; }
+}
+
+// ── Tool/function calling wire types ────────────────────────────────────────────
+public sealed class OpenAiTool
+{
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "function";
+
+    [JsonPropertyName("function")]
+    public OpenAiFunctionDefinition Function { get; set; } = new();
+}
+
+public sealed class OpenAiFunctionDefinition
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("description")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Description { get; set; }
+
+    [JsonPropertyName("parameters")]
+    public JsonElement? Parameters { get; set; }
+}
+
+public sealed class OpenAiToolCall
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "function";
+
+    [JsonPropertyName("function")]
+    public OpenAiFunctionCall Function { get; set; } = new();
+}
+
+public sealed class OpenAiFunctionCall
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    // OpenAI sends arguments as a JSON-encoded string (not a JSON object).
+    [JsonPropertyName("arguments")]
+    public string Arguments { get; set; } = string.Empty;
 }
 
 public sealed class OpenAiUsage
@@ -190,6 +300,131 @@ public sealed class OpenAiUsage
 
     [JsonPropertyName("total_tokens")]
     public int TotalTokens { get; set; }
+}
+
+// ── Embeddings (Phase 2) ────────────────────────────────────────────────────────
+public sealed class OpenAiEmbeddingsRequest
+{
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = string.Empty;
+
+    // OpenAI accepts a string or an array of strings (token-array inputs are not supported).
+    [JsonPropertyName("input")]
+    public JsonElement Input { get; set; }
+
+    [JsonPropertyName("dimensions")]
+    public int? Dimensions { get; set; }
+
+    [JsonPropertyName("encoding_format")]
+    public string? EncodingFormat { get; set; }
+
+    [JsonPropertyName("user")]
+    public string? User { get; set; }
+}
+
+public sealed class OpenAiEmbeddingsResponse
+{
+    [JsonPropertyName("object")]
+    public string Object { get; set; } = "list";
+
+    [JsonPropertyName("data")]
+    public List<OpenAiEmbeddingData> Data { get; set; } = [];
+
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = string.Empty;
+
+    [JsonPropertyName("usage")]
+    public OpenAiEmbeddingsUsage Usage { get; set; } = new();
+}
+
+public sealed class OpenAiEmbeddingData
+{
+    [JsonPropertyName("object")]
+    public string Object { get; set; } = "embedding";
+
+    [JsonPropertyName("embedding")]
+    public IReadOnlyList<float> Embedding { get; set; } = [];
+
+    [JsonPropertyName("index")]
+    public int Index { get; set; }
+}
+
+public sealed class OpenAiEmbeddingsUsage
+{
+    [JsonPropertyName("prompt_tokens")]
+    public int PromptTokens { get; set; }
+
+    [JsonPropertyName("total_tokens")]
+    public int TotalTokens { get; set; }
+}
+
+// ── Completions / FIM (Phase 3) ─────────────────────────────────────────────────
+public sealed class OpenAiCompletionRequest
+{
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = string.Empty;
+
+    // OpenAI accepts a string or an array of strings (token-array prompts are not supported).
+    [JsonPropertyName("prompt")]
+    public JsonElement Prompt { get; set; }
+
+    // Fill-in-the-middle: text after the insertion point.
+    [JsonPropertyName("suffix")]
+    public string? Suffix { get; set; }
+
+    [JsonPropertyName("max_tokens")]
+    public int? MaxTokens { get; set; }
+
+    [JsonPropertyName("temperature")]
+    public float? Temperature { get; set; }
+
+    [JsonPropertyName("top_p")]
+    public float? TopP { get; set; }
+
+    [JsonPropertyName("stop")]
+    public JsonElement? Stop { get; set; }
+
+    [JsonPropertyName("stream")]
+    public bool Stream { get; set; }
+
+    [JsonPropertyName("user")]
+    public string? User { get; set; }
+}
+
+public sealed class OpenAiCompletionResponse
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = $"cmpl-{Guid.NewGuid():N}";
+
+    [JsonPropertyName("object")]
+    public string Object { get; set; } = "text_completion";
+
+    [JsonPropertyName("created")]
+    public long Created { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = string.Empty;
+
+    [JsonPropertyName("choices")]
+    public List<OpenAiCompletionChoice> Choices { get; set; } = [];
+
+    [JsonPropertyName("usage")]
+    public OpenAiUsage? Usage { get; set; }
+}
+
+public sealed class OpenAiCompletionChoice
+{
+    [JsonPropertyName("index")]
+    public int Index { get; set; }
+
+    [JsonPropertyName("text")]
+    public string Text { get; set; } = string.Empty;
+
+    [JsonPropertyName("finish_reason")]
+    public string? FinishReason { get; set; } = "stop";
+
+    [JsonPropertyName("logprobs")]
+    public object? Logprobs { get; set; }
 }
 
 // ── Streaming (SSE) chunk shapes ────────────────────────────────────────────────

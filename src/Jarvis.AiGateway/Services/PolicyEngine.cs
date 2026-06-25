@@ -9,6 +9,21 @@ public interface IPolicyEngine
 {
     Task<PolicyDecision> AuthorizeAsync(UserContext user, RequestContext context, AiChatRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<GatewayModel>> GetVisibleModelsAsync(UserContext user, CancellationToken cancellationToken);
+
+    // Embeddings authorization (Phase 2). Default implementations fail closed / return empty so
+    // existing test stubs compile unchanged; the production PolicyEngine overrides them.
+    Task<PolicyDecision> AuthorizeEmbeddingsAsync(UserContext user, RequestContext context, AiEmbeddingsRequest request, CancellationToken cancellationToken) =>
+        Task.FromResult(new PolicyDecision(false, "Embeddings authorization is not configured.", null, PolicyRuleIds.ModelNotFound));
+
+    Task<IReadOnlyList<GatewayModel>> GetVisibleEmbeddingModelsAsync(UserContext user, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<GatewayModel>>([]);
+
+    // Completions/FIM authorization (Phase 3). Default fails closed / returns empty.
+    Task<PolicyDecision> AuthorizeCompletionAsync(UserContext user, RequestContext context, AiCompletionRequest request, CancellationToken cancellationToken) =>
+        Task.FromResult(new PolicyDecision(false, "Completions authorization is not configured.", null, PolicyRuleIds.ModelNotFound));
+
+    Task<IReadOnlyList<GatewayModel>> GetVisibleCompletionModelsAsync(UserContext user, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<GatewayModel>>([]);
 }
 
 public interface IPolicyRule
@@ -38,6 +53,7 @@ public sealed class PolicyEngine : IPolicyEngine
         new ModelConfiguredRule(),
         new ModelEnabledRule(),
         new ModelTextOutputRule(),
+        new DeveloperKeyModelAllowlistRule(),
         new GroupAuthorizationRule(),
         new PromptSizeRule(),
         new BlockedPatternRule(options),
@@ -60,6 +76,78 @@ public sealed class PolicyEngine : IPolicyEngine
         }
 
         var evaluationContext = new PolicyEvaluationContext(user, context, request, model);
+        foreach (var rule in _rules)
+        {
+            var result = rule.Evaluate(evaluationContext);
+            if (!result.Allowed)
+            {
+                return new PolicyDecision(false, result.Reason, model, result.RuleId);
+            }
+        }
+
+        return new PolicyDecision(true, "ALLOW", model, PolicyRuleIds.Allow);
+    }
+
+    public async Task<IReadOnlyList<GatewayModel>> GetVisibleEmbeddingModelsAsync(UserContext user, CancellationToken cancellationToken)
+    {
+        var models = await modelRegistry.GetEmbeddingModelsAsync(cancellationToken);
+        return models.Where(m => IsUserInAllowedGroup(user, m)).ToList();
+    }
+
+    public async Task<IReadOnlyList<GatewayModel>> GetVisibleCompletionModelsAsync(UserContext user, CancellationToken cancellationToken)
+    {
+        var models = await modelRegistry.GetCompletionModelsAsync(cancellationToken);
+        return models.Where(m => IsUserInAllowedGroup(user, m)).ToList();
+    }
+
+    public async Task<PolicyDecision> AuthorizeCompletionAsync(UserContext user, RequestContext context, AiCompletionRequest request, CancellationToken cancellationToken)
+    {
+        var model = await modelRegistry.FindCompletionModelAsync(request.Model, cancellationToken);
+        if (model is null)
+        {
+            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled or not configured for completions.", null, PolicyRuleIds.ModelNotFound);
+        }
+
+        // Reuse the full rule pipeline: prompt (+ FIM suffix) become user content, so group, ITAR,
+        // blocked-pattern, and prompt-size rules ALL apply to the autocomplete egress.
+        var messages = new List<AiMessage> { new("user", request.Prompt) };
+        if (!string.IsNullOrEmpty(request.Suffix))
+        {
+            messages.Add(new AiMessage("user", request.Suffix));
+        }
+
+        var synthetic = new AiChatRequest(request.Model, messages, new AiGenerationOptions(null, null, null, []), new Dictionary<string, string>(), false);
+        var evaluationContext = new PolicyEvaluationContext(user, context, synthetic, model);
+        foreach (var rule in _rules)
+        {
+            var result = rule.Evaluate(evaluationContext);
+            if (!result.Allowed)
+            {
+                return new PolicyDecision(false, result.Reason, model, result.RuleId);
+            }
+        }
+
+        return new PolicyDecision(true, "ALLOW", model, PolicyRuleIds.Allow);
+    }
+
+    public async Task<PolicyDecision> AuthorizeEmbeddingsAsync(UserContext user, RequestContext context, AiEmbeddingsRequest request, CancellationToken cancellationToken)
+    {
+        var model = await modelRegistry.FindEmbeddingModelAsync(request.Model, cancellationToken);
+        if (model is null)
+        {
+            return new PolicyDecision(false, $"Model '{request.Model}' is not enabled or not configured for embeddings.", null, PolicyRuleIds.ModelNotFound);
+        }
+
+        // Reuse the full rule pipeline by mapping each embedding input to user content, so group,
+        // ITAR, blocked-pattern, and prompt-size rules ALL apply to this bulk source-code egress.
+        var synthetic = new AiChatRequest(
+            request.Model,
+            request.Inputs.Select(i => new AiMessage("user", i)).ToList(),
+            new AiGenerationOptions(null, null, null, []),
+            new Dictionary<string, string>(),
+            false);
+
+        var evaluationContext = new PolicyEvaluationContext(user, context, synthetic, model);
         foreach (var rule in _rules)
         {
             var result = rule.Evaluate(evaluationContext);
@@ -104,13 +192,66 @@ public sealed class ModelConfiguredRule : IPolicyRule
 
     public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
     {
-        var modelId = context.Model.BedrockModelId;
-        if (string.IsNullOrWhiteSpace(modelId) || GatewayOptionsValidator.LooksLikePlaceholder(modelId))
+        var model = context.Model;
+        var provider = string.IsNullOrWhiteSpace(model.ProviderName) ? "aws-bedrock" : model.ProviderName.Trim();
+
+        // Each provider has its own routing identifier; a missing or placeholder identifier means
+        // the alias is not really configured.  An unknown provider fails closed.
+        if (provider.Equals("aws-bedrock", StringComparison.OrdinalIgnoreCase))
         {
-            return PolicyRuleResult.Deny(RuleId, $"Model alias '{context.Model.Alias}' does not have a real Bedrock model ID configured.");
+            return IsRealIdentifier(model.BedrockModelId)
+                ? PolicyRuleResult.Allow(RuleId)
+                : PolicyRuleResult.Deny(RuleId, $"Model alias '{model.Alias}' does not have a real Bedrock model ID configured.");
         }
 
-        return PolicyRuleResult.Allow(RuleId);
+        if (provider.Equals("azure-openai", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsRealIdentifier(model.AzureDeploymentName)
+                ? PolicyRuleResult.Allow(RuleId)
+                : PolicyRuleResult.Deny(RuleId, $"Model alias '{model.Alias}' does not have a real Azure deployment name configured.");
+        }
+
+        return PolicyRuleResult.Deny(RuleId, $"Model alias '{model.Alias}' has an unsupported provider '{model.ProviderName}'.");
+    }
+
+    private static bool IsRealIdentifier(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && !GatewayOptionsValidator.LooksLikePlaceholder(value);
+}
+
+/// <summary>
+/// Enforces a developer API key's optional model allowlist.  No-op for any non-developer-key
+/// principal, so it never affects JWT/broker/service-key authorization.  This is a per-credential
+/// restriction layered ON TOP of the existing group/ITAR rules — it can only further restrict,
+/// never grant — so a developer key cannot become an authorization escalation path.
+/// </summary>
+public sealed class DeveloperKeyModelAllowlistRule : IPolicyRule
+{
+    public string RuleId => PolicyRuleIds.ModelNotInKeyScope;
+
+    public PolicyRuleResult Evaluate(PolicyEvaluationContext context)
+    {
+        var claims = context.User.Claims;
+
+        if (!claims.TryGetValue(DeveloperApiKeyClaims.AuthTypeClaim, out var authType) ||
+            !string.Equals(authType, DeveloperApiKeyClaims.AuthTypeValue, StringComparison.Ordinal))
+        {
+            return PolicyRuleResult.Allow(RuleId);
+        }
+
+        if (!claims.TryGetValue(DeveloperApiKeyClaims.ModelAllowlistClaim, out var csv) || string.IsNullOrWhiteSpace(csv))
+        {
+            return PolicyRuleResult.Allow(RuleId);
+        }
+
+        var allowed = csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var model = context.Model;
+        var permitted = allowed.Any(a =>
+            a.Equals(model.Id, StringComparison.OrdinalIgnoreCase) ||
+            a.Equals(model.Alias, StringComparison.OrdinalIgnoreCase));
+
+        return permitted
+            ? PolicyRuleResult.Allow(RuleId)
+            : PolicyRuleResult.Deny(RuleId, $"Model '{model.Alias}' is not in the developer API key's allowed model list.");
     }
 }
 

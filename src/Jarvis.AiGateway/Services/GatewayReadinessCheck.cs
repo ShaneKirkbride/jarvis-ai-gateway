@@ -79,7 +79,17 @@ public sealed class GatewayReadinessCheck(
         {
             foreach (var model in _gatewayOptions.Models.Where(m => m.Enabled))
             {
-                if (string.IsNullOrWhiteSpace(model.BedrockModelId)
+                // Provider-aware: Azure aliases are routed by deployment name, not a Bedrock model ID.
+                var provider = string.IsNullOrWhiteSpace(model.ProviderName) ? "aws-bedrock" : model.ProviderName.Trim();
+                if (provider.Equals("azure-openai", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(model.AzureDeploymentName)
+                        || model.AzureDeploymentName.StartsWith("REPLACE_WITH", StringComparison.OrdinalIgnoreCase))
+                    {
+                        failures.Add($"Gateway:Models alias '{model.Alias}' must use a real Azure deployment name in Production.");
+                    }
+                }
+                else if (string.IsNullOrWhiteSpace(model.BedrockModelId)
                     || model.BedrockModelId.StartsWith("REPLACE_WITH", StringComparison.OrdinalIgnoreCase))
                 {
                     failures.Add($"Gateway:Models alias '{model.Alias}' must use a real Bedrock model ID in Production.");

@@ -33,7 +33,25 @@ public sealed class GatewayOptions
     public RequestValidationOptions RequestValidation { get; set; } = new();
     public ReadinessOptions Readiness { get; set; } = new();
     public IdentityBrokerOptions IdentityBroker { get; set; } = new();
+    public AzureOpenAiOptions AzureOpenAi { get; set; } = new();
+    public DeveloperAuthOptions DeveloperAuth { get; set; } = new();
+    public DiscoveryOptions Discovery { get; set; } = new();
+    public CompletionsOptions Completions { get; set; } = new();
     public List<ModelRouteOptions> Models { get; set; } = [];
+}
+
+/// <summary>
+/// Controls for /v1/completions (FIM/autocomplete, Phase 3).  Autocomplete is the highest-egress
+/// surface (it can ship surrounding file context on every keystroke-batch), so it is disabled for
+/// ITAR requests by default and the inbound context is hard-capped.
+/// </summary>
+public sealed class CompletionsOptions
+{
+    // Disable autocomplete for ITAR workspaces/requests (default true = fail-safe).
+    public bool DisableForItar { get; set; } = true;
+
+    // Hard cap on prompt+suffix length (characters). Clients must send small, intentional context.
+    public int MaxContextCharacters { get; set; } = 8000;
 }
 
 public sealed class RequestLimitOptions
@@ -106,13 +124,32 @@ public sealed class RequestValidationOptions
     public int MaxStopSequences { get; set; } = 4;
     public int MaxStopSequenceCharacters { get; set; } = 200;
     public int MaxMetadataBytes { get; set; } = 8192;
+
+    // Tool/function calling (Phase 1) request-shape limits.
+    public int MaxTools { get; set; } = 64;
+    public int MaxToolSchemaBytes { get; set; } = 32768;
+
+    // Embeddings (Phase 2): max number of inputs per /v1/embeddings request.
+    public int MaxEmbeddingInputs { get; set; } = 256;
 }
 
 public sealed class ModelRouteOptions
 {
     public string Alias { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
+
+    // Provider this model routes to. "aws-bedrock" (default) or "azure-openai".
+    public string ProviderName { get; set; } = "aws-bedrock";
+
     public string BedrockModelId { get; set; } = string.Empty;
+
+    // Azure OpenAI deployment name. Required when ProviderName is "azure-openai".
+    public string AzureDeploymentName { get; set; } = string.Empty;
+
+    // Optional underlying Azure model (e.g. "gpt-5.1") used to apply model-family request
+    // compatibility rules such as the GPT-5 max_completion_tokens requirement.
+    public string AzureModelName { get; set; } = string.Empty;
+
     public bool Enabled { get; set; } = true;
     public bool ItarApproved { get; set; }
 
@@ -131,8 +168,22 @@ public sealed class ModelRouteOptions
 
     public int MaxInputCharacters { get; set; } = 120000;
     public int MaxOutputTokens { get; set; } = 2048;
+
+    // Optional advertised context window (tokens), surfaced in /v1/models capability metadata.
+    public int? ContextWindowTokens { get; set; }
+
     public string InvocationMode { get; set; } = "Auto";
     public bool? SupportsConverse { get; set; }
+
+    // Enables tool/function calling for this model (Phase 1). Default false = fail-closed.
+    public bool SupportsTools { get; set; }
+
+    // Marks this model as usable on /v1/embeddings (Phase 2). Default false = fail-closed.
+    public bool SupportsEmbeddings { get; set; }
+
+    // Marks this model as usable on /v1/completions (FIM/autocomplete, Phase 3). Default false.
+    public bool SupportsFim { get; set; }
+
     public List<string> OutputModalities { get; set; } = [];
     public List<string> InputModalities { get; set; } = [];
 }

@@ -7,7 +7,14 @@
     <CoverletOutputFormat>json</CoverletOutputFormat>
     <Threshold>100</Threshold>
     <ThresholdType>line</ThresholdType>
-    <ExcludeByFile>**/Program.cs,**/Models/*.cs,**/Options/GatewayOptions.cs,**/Services/BedrockInvocationStrategies.cs,**/Services/BedrockModelDiscoveryService.cs,**/Services/AuditLogger.cs,**/Services/MicrosoftGraphGroupQueryExecutor.cs,**/Properties/*.cs</ExcludeByFile>
+    <!--
+      Excluded files: Program.cs (composition root), model/options POCOs, and infrastructure
+      adapters that perform external I/O (Bedrock SDK strategies, model discovery, audit logging,
+      Graph). AzureOpenAiProvider.cs is the HTTP-transport adapter for Azure OpenAI and is excluded
+      on the same basis as BedrockInvocationStrategies.cs; its behavior is still covered by
+      AzureOpenAiProviderTests. AzureOpenAiOptions.cs is an options POCO (parity with GatewayOptions.cs).
+    -->
+    <ExcludeByFile>**/Program.cs,**/Models/*.cs,**/Options/GatewayOptions.cs,**/Options/AzureOpenAiOptions.cs,**/Options/DeveloperApiKeyOptions.cs,**/Services/BedrockInvocationStrategies.cs,**/Services/BedrockModelDiscoveryService.cs,**/Services/AzureOpenAiProvider.cs,**/Services/AuditLogger.cs,**/Services/MicrosoftGraphGroupQueryExecutor.cs,**/Properties/*.cs,**/*.generated.cs</ExcludeByFile>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />

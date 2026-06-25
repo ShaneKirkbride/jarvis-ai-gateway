@@ -435,3 +435,7 @@ CLAUDE.local.md
 
 # Local mTLS smoke-test certs - do not commit
 mtls-certs/
+
+# Local smoke-test request bodies (curl payloads) - do not commit
+/azure-gpt51-*.json
+/jarvis2-*-body.json

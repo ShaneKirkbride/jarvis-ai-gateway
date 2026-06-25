@@ -151,6 +151,7 @@ public sealed class OpenWebUiContractTests : IClassFixture<OpenWebUiContractTest
             builder.UseEnvironment("Development");
             builder.ConfigureAppConfiguration((_, config) =>
             {
+                TestConfig.RemoveJsonSources(config);
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["Jwt:Authority"] = "https://issuer.example.test/",
@@ -161,6 +162,9 @@ public sealed class OpenWebUiContractTests : IClassFixture<OpenWebUiContractTest
                     // explicitly so this test app boots after the broker default flipped on.
                     ["Gateway:IdentityBroker:Enabled"] = "false",
                     ["Gateway:ModelDiscovery:Enabled"] = "false",
+                    // Preserved from appsettings.Development; set explicitly because the JSON sources
+                    // are dropped below to keep this factory's Gateway:Models authoritative.
+                    ["Gateway:Streaming:FallbackToNonStreaming"] = "true",
                     ["Gateway:Models:0:Alias"] = "general",
                     ["Gateway:Models:0:BedrockModelId"] = "anthropic.claude-3-haiku-20240307-v1:0",
                     ["Gateway:Models:0:RequiredGroups:0"] = "AI-General-Users",

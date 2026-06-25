@@ -106,6 +106,28 @@ public sealed class ReadinessAndMetricsTests
     }
 
     [Fact]
+    public void Readiness_is_provider_aware_for_azure_models_in_production()
+    {
+        var options = Options();
+        options.Models =
+        [
+            new ModelRouteOptions { Alias = "jarvis2-chat", ProviderName = "azure-openai", AzureDeploymentName = "jarvis2-chat", Enabled = true }
+        ];
+
+        var ready = new GatewayReadinessCheck(MsOptions.Create(options), MsOptions.Create(new JwtOptions { Authority = "https://issuer.example", Audience = "api" }), Environment("Production")).Check();
+
+        // A real Azure deployment name satisfies the Production check — it is NOT flagged for a
+        // missing Bedrock model ID.
+        Assert.True(ready.Ready);
+
+        options.Models = [new ModelRouteOptions { Alias = "jarvis2-chat", ProviderName = "azure-openai", AzureDeploymentName = "", Enabled = true }];
+        var missing = new GatewayReadinessCheck(MsOptions.Create(options), MsOptions.Create(new JwtOptions { Authority = "https://issuer.example", Audience = "api" }), Environment("Production")).Check();
+
+        Assert.False(missing.Ready);
+        Assert.Contains(missing.FailedChecks, f => f.Contains("Azure deployment name"));
+    }
+
+    [Fact]
     public void Gateway_metrics_methods_are_safe_noops_without_exporter()
     {
         var metrics = new GatewayMetrics();

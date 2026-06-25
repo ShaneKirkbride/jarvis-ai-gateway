@@ -17,8 +17,7 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
     private readonly IRequestContextFactory requestContextFactory;
     private readonly IOpenAiChatRequestValidator validator;
     private readonly IPolicyEngine policyEngine;
-    private readonly IEnumerable<IBedrockInvocationStrategy> strategies;
-    private readonly IEnumerable<IBedrockStreamingStrategy> streamingStrategies;
+    private readonly IReadOnlyList<IAiProvider> providers;
     private readonly IContentRedactor redactor;
     private readonly IAuditLogger auditLogger;
     private readonly IOpenAiErrorMapper errorMapper;
@@ -26,9 +25,10 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
     private readonly GatewayOptions _options;
     private readonly ResiliencePipeline _resilience;
 
-    // Convenience constructor for tests (no metrics, no custom resilience pipeline).
-    // streamingStrategies is optional so existing call sites that exercise the non-streaming
-    // path do not need to supply one.
+    // Convenience constructor for tests (no metrics, no custom resilience pipeline).  Accepts the
+    // Bedrock strategy collections directly and wraps them in a BedrockProvider so existing
+    // strategy-based tests keep working unchanged.  streamingStrategies is optional so call sites
+    // that exercise only the non-streaming path do not need to supply one.
     public ChatCompletionOrchestrator(
         IUserContextFactory userContextFactory,
         IRequestContextFactory requestContextFactory,
@@ -40,31 +40,34 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
         IOpenAiErrorMapper errorMapper,
         IOptions<GatewayOptions> options,
         IEnumerable<IBedrockStreamingStrategy>? streamingStrategies = null)
-        : this(userContextFactory, requestContextFactory, validator, policyEngine, strategies, redactor, auditLogger, errorMapper, new NoOpGatewayMetrics(), options, new ResiliencePipelineBuilder().Build(), streamingStrategies ?? [])
+        : this(userContextFactory, requestContextFactory, validator, policyEngine,
+            [new BedrockProvider(strategies, streamingStrategies ?? [])],
+            redactor, auditLogger, errorMapper, new NoOpGatewayMetrics(), options, new ResiliencePipelineBuilder().Build())
     {
     }
 
-    // Full constructor used by the DI container in production.
+    // Full constructor used by the DI container in production (registered via an explicit factory
+    // in Program.cs, since this is not a parameter superset of the strategy-based convenience
+    // constructor and the built-in container would otherwise see the two as ambiguous).
+    // Providers are routed by GatewayModel.ProviderName.
     public ChatCompletionOrchestrator(
         IUserContextFactory userContextFactory,
         IRequestContextFactory requestContextFactory,
         IOpenAiChatRequestValidator validator,
         IPolicyEngine policyEngine,
-        IEnumerable<IBedrockInvocationStrategy> strategies,
+        IEnumerable<IAiProvider> providers,
         IContentRedactor redactor,
         IAuditLogger auditLogger,
         IOpenAiErrorMapper errorMapper,
         IGatewayMetrics metrics,
         IOptions<GatewayOptions> options,
-        ResiliencePipeline resilience,
-        IEnumerable<IBedrockStreamingStrategy> streamingStrategies)
+        ResiliencePipeline resilience)
     {
         this.userContextFactory = userContextFactory;
         this.requestContextFactory = requestContextFactory;
         this.validator = validator;
         this.policyEngine = policyEngine;
-        this.strategies = strategies;
-        this.streamingStrategies = streamingStrategies;
+        this.providers = providers.ToList();
         this.redactor = redactor;
         this.auditLogger = auditLogger;
         this.errorMapper = errorMapper;
@@ -109,17 +112,22 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
                 return WriteMapped(audit, stopwatch, errorMapper.MapValidation(validation));
             }
 
+            // Route to the provider for the resolved model.  ProviderName ("aws-bedrock",
+            // "azure-openai", …) selects the implementation; everything above this line is
+            // provider-agnostic.
+            var provider = ResolveProvider(decision.Model);
+
             // Streaming is decided here — after authentication, policy authorization, and model
             // resolution — so a policy denial still returns 403 before any stream is opened.
             if (validation.AiRequest.Stream)
             {
-                var streamingStrategy = streamingStrategies.FirstOrDefault(s => s.CanHandle(decision.Model, validation.AiRequest));
-                if (streamingStrategy is not null)
+                if (provider is IStreamingAiProvider streaming && streaming.CanStream(decision.Model, validation.AiRequest))
                 {
-                    audit.InvocationStrategy = streamingStrategy.Name;
+                    var streamName = streaming.StreamInvocationName(decision.Model, validation.AiRequest);
+                    audit.InvocationStrategy = streamName;
                     metrics.RecordRequest(request.Model ?? string.Empty);
                     return new OpenAiSseStreamResult(
-                        streamingStrategy,
+                        provider,
                         decision.Model,
                         validation.AiRequest,
                         requestContext,
@@ -130,10 +138,11 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
                         metrics,
                         redactor,
                         _options,
-                        stopwatch);
+                        stopwatch,
+                        streamName);
                 }
 
-                // No streaming-capable adapter for this model.  Either fall back to a single
+                // No streaming-capable provider for this model.  Either fall back to a single
                 // non-streaming completion (backwards-compatible behaviour) or reject.
                 if (!_options.Streaming.FallbackToNonStreaming)
                 {
@@ -143,14 +152,7 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
                 }
             }
 
-            var orderedStrategies = strategies.OrderBy(s => s is BedrockConverseInvocationStrategy ? 0 : 1).ToArray();
-            var strategy = orderedStrategies.FirstOrDefault(s => s.CanHandle(decision.Model, validation.AiRequest));
-            if (strategy is null)
-            {
-                throw new NotSupportedException(BedrockInvokeModelTextInvocationStrategy.UnsupportedAdapterMessage);
-            }
-
-            audit.InvocationStrategy = strategy.Name;
+            audit.InvocationStrategy = provider.ProviderName;
             metrics.RecordRequest(request.Model ?? string.Empty);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, _options.ProviderTimeoutSeconds)));
@@ -160,9 +162,9 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
             try
             {
                 result = await _resilience.ExecuteAsync(
-                    async ct => await strategy.InvokeAsync(decision.Model, validation.AiRequest, requestContext, ct),
+                    async ct => await provider.CompleteAsync(decision.Model, validation.AiRequest, requestContext, ct),
                     timeoutCts.Token);
-                metrics.RecordBedrockInvocation(strategy.Name, providerStopwatch.Elapsed, success: true);
+                metrics.RecordBedrockInvocation(result.ProviderMetadata.InvocationStrategy, providerStopwatch.Elapsed, success: true);
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
             {
@@ -177,9 +179,19 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
                     var redacted = redactor.Redact(choice.Message.Content);
                     choice.Message.Content = redacted.Text;
                     audit.RedactionCount += redacted.RedactionCount;
+
+                    // Tool-call arguments are model output too — redact them outbound so a model
+                    // that echoes a secret into an argument cannot leak it past the gateway.
+                    foreach (var toolCall in choice.Message.ToolCalls ?? [])
+                    {
+                        var redactedArgs = redactor.Redact(toolCall.Function.Arguments);
+                        toolCall.Function.Arguments = redactedArgs.Text;
+                        audit.RedactionCount += redactedArgs.RedactionCount;
+                    }
                 }
             }
 
+            PopulateToolAudit(audit, validation.AiRequest, result);
             PopulateSuccessAudit(audit, result, stopwatch.ElapsedMilliseconds);
             auditLogger.Write(audit);
             metrics.RecordTokenUsage(request.Model ?? string.Empty, audit.InputTokens ?? 0, audit.OutputTokens ?? 0);
@@ -201,6 +213,17 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
         }
     }
 
+    // Resolves the provider for a model by ProviderName.  Falls back to the single registered
+    // provider when exactly one exists (Bedrock-only deployments and the unit-test harness) so an
+    // unmatched-but-unambiguous name still routes; otherwise it fails closed.
+    private IAiProvider ResolveProvider(GatewayModel model)
+    {
+        var match = providers.FirstOrDefault(p => p.ProviderName.Equals(model.ProviderName, StringComparison.OrdinalIgnoreCase));
+        if (match is not null) return match;
+        if (providers.Count == 1) return providers[0];
+        throw new NotSupportedException($"No AI provider is registered for ProviderName '{model.ProviderName}'.");
+    }
+
     private GatewayAuditEvent CreateAudit(UserContext user, RequestContext requestContext, OpenAiChatCompletionRequest request, AiChatRequest? aiRequest) => new()
     {
         RequestId = requestContext.RequestId,
@@ -214,7 +237,10 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
         RequestedModelAlias = request?.Model ?? string.Empty,
         Region = _options.AwsRegion,
         EndpointMode = string.IsNullOrWhiteSpace(_options.BedrockRuntimeEndpointDns) ? "regional-dns" : "vpce-override",
-        PromptCharacters = aiRequest is null ? 0 : string.Join("\n", aiRequest.Messages.Select(m => m.Content)).Length
+        PromptCharacters = aiRequest is null ? 0 : string.Join("\n", aiRequest.Messages.Select(m => m.Content)).Length,
+        // Auth provenance (e.g. developer API key id) for compliance review — never the raw key.
+        AuthType = user.Claims.GetValueOrDefault("jarvis_auth_type"),
+        ApiKeyId = user.Claims.GetValueOrDefault("jarvis:apikey_id")
     };
 
     private IResult WriteMapped(GatewayAuditEvent audit, Stopwatch stopwatch, OpenAiErrorMapping mapping)
@@ -253,6 +279,22 @@ public sealed class ChatCompletionOrchestrator : IChatCompletionOrchestrator
         public void RecordIdentityLookupGraphCall(TimeSpan elapsed, bool success) { }
         public void RecordIdentityLookupFailure(string reason) { }
         public void RecordIdentityPreAuthRateLimited(string partition) { }
+    }
+
+    // Records tool-calling activity for compliance review: counts and function NAMES only.
+    // Tool-call arguments and tool results are content and are never written to audit.
+    private static void PopulateToolAudit(GatewayAuditEvent audit, AiChatRequest? aiRequest, AiChatResult result)
+    {
+        if (aiRequest?.Tools is { Count: > 0 } tools)
+        {
+            audit.ToolsOffered = tools.Count;
+        }
+
+        if (result.ToolCalls is { Count: > 0 } calls)
+        {
+            audit.ToolCallsReturned = calls.Count;
+            audit.ToolCallNames = calls.Select(c => c.Name).ToArray();
+        }
     }
 
     private static void PopulateSuccessAudit(GatewayAuditEvent audit, AiChatResult result, long latencyMs)

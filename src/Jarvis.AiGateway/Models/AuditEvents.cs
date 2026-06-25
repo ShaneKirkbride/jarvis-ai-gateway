@@ -35,4 +35,17 @@ public sealed class GatewayAuditEvent
     public string? ErrorCategory { get; set; }
     public string? ProviderRequestId { get; set; }
     public string EndpointMode { get; set; } = "regional-or-vpce-configured";
+
+    // How the caller authenticated (e.g. "developer_api_key", "service_api_key") and, for a
+    // developer key, its key id. Never the raw key. Null for legacy JWT/broker users.
+    public string? AuthType { get; set; }
+    public string? ApiKeyId { get; set; }
+
+    // Tool/function calling (Phase 1): counts + function names only. Never tool arguments/results.
+    public int? ToolsOffered { get; set; }
+    public int? ToolCallsReturned { get; set; }
+    public string[]? ToolCallNames { get; set; }
+
+    // Embeddings (Phase 2): number of inputs only — never the input text.
+    public int? EmbeddingInputCount { get; set; }
 }

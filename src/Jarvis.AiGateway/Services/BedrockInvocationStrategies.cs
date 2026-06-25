@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
+using Amazon.Runtime.Documents;
 using Jarvis.AiGateway.Models;
 using Jarvis.AiGateway.Options;
 using Microsoft.Extensions.Options;
@@ -83,17 +84,29 @@ public sealed class BedrockConverseInvocationStrategy(
             bedrockRequest.System = components.System;
         }
 
+        if (components.ToolConfig is not null)
+        {
+            bedrockRequest.ToolConfig = components.ToolConfig;
+        }
+
         logger.LogInformation("Invoking Bedrock Converse for model {ModelId} ({Alias}).", model.BedrockModelId, model.Alias);
         var providerStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var response = await bedrockRuntime.ConverseAsync(bedrockRequest, cancellationToken);
         providerStopwatch.Stop();
-        var responseText = response.Output?.Message?.Content?
-            .Where(c => !string.IsNullOrEmpty(c.Text))
-            .Select(c => c.Text)
-            .DefaultIfEmpty(string.Empty)
-            .Aggregate((a, b) => a + b) ?? string.Empty;
 
-        return new AiChatResult(responseText, new Jarvis.AiGateway.Models.TokenUsage(response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0), response.StopReason?.Value ?? "stop", new ProviderInvocationMetadata(model.ProviderName, Name, providerStopwatch.ElapsedMilliseconds, response.ResponseMetadata?.RequestId));
+        var contentBlocks = response.Output?.Message?.Content ?? [];
+        var responseText = string.Concat(contentBlocks.Where(c => !string.IsNullOrEmpty(c.Text)).Select(c => c.Text));
+        var toolCalls = contentBlocks
+            .Where(c => c.ToolUse is not null)
+            .Select(c => new AiToolCall(c.ToolUse.ToolUseId, c.ToolUse.Name, BedrockToolMapper.DocumentToJson(c.ToolUse.Input)))
+            .ToList();
+
+        return new AiChatResult(
+            responseText,
+            new Jarvis.AiGateway.Models.TokenUsage(response.Usage?.InputTokens ?? 0, response.Usage?.OutputTokens ?? 0, response.Usage?.TotalTokens ?? 0),
+            response.StopReason?.Value ?? "stop",
+            new ProviderInvocationMetadata(model.ProviderName, Name, providerStopwatch.ElapsedMilliseconds, response.ResponseMetadata?.RequestId),
+            toolCalls.Count > 0 ? toolCalls : null);
     }
 }
 
@@ -109,7 +122,8 @@ internal static class ConverseRequestComponents
         List<SystemContentBlock> System,
         List<Message> Messages,
         InferenceConfiguration Inference,
-        Dictionary<string, string> Metadata);
+        Dictionary<string, string> Metadata,
+        ToolConfiguration? ToolConfig);
 
     public static Result Build(
         GatewayModel model,
@@ -128,21 +142,54 @@ internal static class ConverseRequestComponents
             || context.ItarMode
             || DataLabelClassifier.IsItar(context.DataLabel);
 
+        string Redact(string value) => redactForThisRequest ? redactor.Redact(value).Text : value;
+
         foreach (var input in request.Messages)
         {
-            var text = input.Content;
-            if (redactForThisRequest)
-            {
-                text = redactor.Redact(text).Text;
-            }
-
-            if (string.IsNullOrWhiteSpace(text)) continue;
-
             if (input.Role.Equals("system", StringComparison.OrdinalIgnoreCase))
             {
-                systemBlocks.Add(new SystemContentBlock { Text = text });
+                var systemText = Redact(input.Content);
+                if (!string.IsNullOrWhiteSpace(systemText)) systemBlocks.Add(new SystemContentBlock { Text = systemText });
                 continue;
             }
+
+            // Tool result returned by the client. Bedrock carries tool results in a USER-role
+            // message; the content is redacted like any untrusted prompt content.
+            if (input.Role.Equals("tool", StringComparison.OrdinalIgnoreCase))
+            {
+                messages.Add(new Message
+                {
+                    Role = ConversationRole.User,
+                    Content = [new ContentBlock { ToolResult = new ToolResultBlock
+                    {
+                        ToolUseId = input.ToolCallId,
+                        Content = [new ToolResultContentBlock { Text = Redact(input.Content) }]
+                    } }]
+                });
+                continue;
+            }
+
+            // Assistant turn that requested tool calls → one ToolUse content block per call.
+            if (input.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase) && input.ToolCalls is { Count: > 0 })
+            {
+                var content = new List<ContentBlock>();
+                var assistantText = Redact(input.Content);
+                if (!string.IsNullOrWhiteSpace(assistantText)) content.Add(new ContentBlock { Text = assistantText });
+                foreach (var call in input.ToolCalls)
+                {
+                    content.Add(new ContentBlock { ToolUse = new ToolUseBlock
+                    {
+                        ToolUseId = call.Id,
+                        Name = call.Name,
+                        Input = BedrockToolMapper.ArgumentsToDocument(Redact(call.ArgumentsJson))
+                    } });
+                }
+                messages.Add(new Message { Role = ConversationRole.Assistant, Content = content });
+                continue;
+            }
+
+            var text = Redact(input.Content);
+            if (string.IsNullOrWhiteSpace(text)) continue;
 
             messages.Add(new Message
             {
@@ -174,7 +221,146 @@ internal static class ConverseRequestComponents
             ["modelAlias"] = model.Alias
         };
 
-        return new Result(systemBlocks, messages, inferenceConfig, metadata);
+        var toolConfig = BedrockToolMapper.BuildToolConfig(request, redactor, redactForThisRequest);
+
+        return new Result(systemBlocks, messages, inferenceConfig, metadata, toolConfig);
+    }
+}
+
+/// <summary>
+/// Maps the provider-neutral tool model to/from Bedrock Converse types (toolConfig / toolUse /
+/// toolResult), including JSON ⇄ <see cref="Document"/> conversion for tool input/output.  Lives
+/// in the (coverage-excluded) Bedrock adapter because it depends on the AWS SDK types; the
+/// provider-neutral request/response mapping it feeds is tested through the orchestrator path.
+/// </summary>
+internal static class BedrockToolMapper
+{
+    public static ToolConfiguration? BuildToolConfig(AiChatRequest request, IContentRedactor redactor, bool redact)
+    {
+        if (request.Tools is not { Count: > 0 } tools)
+        {
+            return null;
+        }
+
+        var config = new ToolConfiguration { Tools = [] };
+        foreach (var tool in tools)
+        {
+            config.Tools.Add(new Tool
+            {
+                ToolSpec = new ToolSpecification
+                {
+                    Name = tool.Name,
+                    Description = tool.Description is null ? null : (redact ? redactor.Redact(tool.Description).Text : tool.Description),
+                    // JSON-schema parameters are structural and passed through unchanged.
+                    InputSchema = new ToolInputSchema { Json = JsonElementToDocument(tool.Parameters) }
+                }
+            });
+        }
+
+        var toolChoice = MapToolChoice(request.ToolChoice);
+        if (toolChoice is not null)
+        {
+            config.ToolChoice = toolChoice;
+        }
+
+        return config;
+    }
+
+    // Bedrock has no explicit "none" choice; for none/unset we omit ToolChoice and let the model decide.
+    private static ToolChoice? MapToolChoice(AiToolChoice? choice) => choice?.Mode switch
+    {
+        "required" => new ToolChoice { Any = new AnyToolChoice() },
+        "function" when !string.IsNullOrWhiteSpace(choice.FunctionName) => new ToolChoice { Tool = new SpecificToolChoice { Name = choice.FunctionName } },
+        "auto" => new ToolChoice { Auto = new AutoToolChoice() },
+        _ => null
+    };
+
+    public static Document ArgumentsToDocument(string argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson))
+        {
+            return new Document(new Dictionary<string, Document>());
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(argumentsJson);
+            return JsonElementToDocument(doc.RootElement);
+        }
+        catch (JsonException)
+        {
+            // A non-JSON arguments string is wrapped as an empty object rather than failing the call.
+            return new Document(new Dictionary<string, Document>());
+        }
+    }
+
+    public static Document JsonElementToDocument(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.Object => new Document(element.EnumerateObject().ToDictionary(p => p.Name, p => JsonElementToDocument(p.Value))),
+        JsonValueKind.Array => new Document(element.EnumerateArray().Select(JsonElementToDocument).ToList()),
+        JsonValueKind.String => new Document(element.GetString()),
+        JsonValueKind.Number => element.TryGetInt64(out var l) ? new Document(l) : new Document(element.GetDouble()),
+        JsonValueKind.True => new Document(true),
+        JsonValueKind.False => new Document(false),
+        _ => new Document()
+    };
+
+    public static string DocumentToJson(Document document)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new System.Text.Json.Utf8JsonWriter(stream))
+        {
+            WriteDocument(writer, document);
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteDocument(System.Text.Json.Utf8JsonWriter writer, Document document)
+    {
+        if (document.IsDictionary())
+        {
+            writer.WriteStartObject();
+            foreach (var pair in document.AsDictionary())
+            {
+                writer.WritePropertyName(pair.Key);
+                WriteDocument(writer, pair.Value);
+            }
+            writer.WriteEndObject();
+        }
+        else if (document.IsList())
+        {
+            writer.WriteStartArray();
+            foreach (var item in document.AsList())
+            {
+                WriteDocument(writer, item);
+            }
+            writer.WriteEndArray();
+        }
+        else if (document.IsString())
+        {
+            writer.WriteStringValue(document.AsString());
+        }
+        else if (document.IsBool())
+        {
+            writer.WriteBooleanValue(document.AsBool());
+        }
+        else if (document.IsInt())
+        {
+            writer.WriteNumberValue(document.AsInt());
+        }
+        else if (document.IsLong())
+        {
+            writer.WriteNumberValue(document.AsLong());
+        }
+        else if (document.IsDouble())
+        {
+            writer.WriteNumberValue(document.AsDouble());
+        }
+        else
+        {
+            writer.WriteNullValue();
+        }
     }
 }
 
@@ -348,38 +534,6 @@ public sealed class BedrockInvokeModelTextInvocationStrategy : IBedrockInvocatio
             .Select(m => m with { Content = _redactor.Redact(m.Content).Text })
             .ToList();
         return request with { Messages = redactedMessages };
-    }
-}
-
-public static class OpenAiResponseFactory
-{
-    public static OpenAiChatCompletionResponse FromResult(string modelId, AiChatResult result) =>
-        FromText(modelId, result.Text, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens, result.FinishReason);
-
-    public static OpenAiChatCompletionResponse FromText(string modelId, string text, int inputTokens = 0, int outputTokens = 0, int totalTokens = 0, string finishReason = "stop") => new()
-    {
-        Model = modelId,
-        Choices =
-        [
-            new OpenAiChoice
-            {
-                Index = 0,
-                Message = new OpenAiAssistantMessage { Role = "assistant", Content = text },
-                FinishReason = NormalizeFinishReason(finishReason)
-            }
-        ],
-        Usage = new OpenAiUsage
-        {
-            PromptTokens = inputTokens,
-            CompletionTokens = outputTokens,
-            TotalTokens = totalTokens == 0 ? inputTokens + outputTokens : totalTokens
-        }
-    };
-
-    private static string NormalizeFinishReason(string? reason)
-    {
-        if (string.IsNullOrWhiteSpace(reason)) return "stop";
-        return reason.Equals("max_tokens", StringComparison.OrdinalIgnoreCase) || reason.Equals("length", StringComparison.OrdinalIgnoreCase) ? "length" : "stop";
     }
 }
 

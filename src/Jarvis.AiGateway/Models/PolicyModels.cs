@@ -6,6 +6,7 @@ public static class PolicyRuleIds
     public const string ModelNotFound = "MODEL_NOT_FOUND";
     public const string ModelPlaceholderId = "MODEL_PLACEHOLDER_ID";
     public const string ModelDisabled = "MODEL_DISABLED";
+    public const string ModelNotInKeyScope = "MODEL_NOT_IN_KEY_SCOPE";
     public const string ModelNoTextOutput = "MODEL_NO_TEXT_OUTPUT";
     public const string UserGroupDenied = "USER_GROUP_DENIED";
     public const string PromptTooLarge = "PROMPT_TOO_LARGE";

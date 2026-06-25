@@ -1,8 +1,19 @@
 # Jarvis AI Gateway
 
-A thin .NET 10 AI Gateway for Open WebUI → Amazon Bedrock Runtime in AWS GovCloud.
+A thin .NET 10 AI Gateway that fronts **Azure OpenAI (Azure Government)** and/or **Amazon Bedrock
+Runtime (AWS GovCloud)** behind one provider-neutral, OpenAI-compatible API. It serves Open WebUI
+and **IDE / OpenAI-compatible developer tools** (VS Code, Visual Studio, Continue/Cline) while
+keeping the real security controls — identity, ITAR, policy, redaction, audit — in a private
+backend service.
 
-This gateway is intentionally small. It gives Open WebUI an OpenAI-compatible API surface while keeping the real security controls in a private backend service.
+> The authoritative, source-grounded API description is [`docs/api-surface.md`](docs/api-surface.md).
+> Developer/IDE access uses per-user keys (`Authorization: Bearer jrvs_…`) — see
+> [`docs/developer-api-keys.md`](docs/developer-api-keys.md) and
+> [`docs/ide-client-integration.md`](docs/ide-client-integration.md). The `X-Jarvis-Gateway-Key`
+> service credential is for Open WebUI / service-to-service use only and must not be given to
+> developers.
+
+This gateway is intentionally small. It gives clients an OpenAI-compatible API surface while keeping the real security controls in a private backend service.
 
 ## What it does
 

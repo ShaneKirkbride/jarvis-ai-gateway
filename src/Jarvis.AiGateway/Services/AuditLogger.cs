@@ -75,7 +75,9 @@ public sealed class AuditLogger(ILogger<AuditLogger> logger) : IAuditLogger
             ["audit.redaction_count"] = auditEvent.RedactionCount,
             ["audit.error_type"] = auditEvent.ErrorType,
             ["audit.error_category"] = auditEvent.ErrorCategory,
-            ["audit.provider_request_id"] = auditEvent.ProviderRequestId
+            ["audit.provider_request_id"] = auditEvent.ProviderRequestId,
+            ["audit.auth_type"] = auditEvent.AuthType,
+            ["audit.api_key_id"] = auditEvent.ApiKeyId
         });
 
         logger.LogInformation(

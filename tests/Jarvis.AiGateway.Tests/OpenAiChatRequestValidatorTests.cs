@@ -2,6 +2,7 @@ using System.Text.Json;
 using Jarvis.AiGateway.Models;
 using Jarvis.AiGateway.Options;
 using Jarvis.AiGateway.Services;
+using Microsoft.AspNetCore.Http;
 using MsOptions = Microsoft.Extensions.Options.Options;
 using Xunit;
 
@@ -25,7 +26,9 @@ public sealed class OpenAiChatRequestValidatorTests
     {
         await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid" }, "messages_required");
         await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "system", Content = Json("rules") }] }, "conversation_message_required");
-        await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "tool", Content = Json("hello") }] }, "unsupported_role");
+        await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "banana", Content = Json("hello") }] }, "unsupported_role");
+        // "tool" is now a recognized role but capability-gated: rejected for a non-tools model.
+        await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "tool", Content = Json("hello"), ToolCallId = "call_1" }] }, "tools_not_supported");
         await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "user", Content = Json(new { text = "object" }) }] }, "unsupported_content");
         await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "user", Content = Json(new object[] { "bad" }) }] }, "unsupported_content_part");
         await AssertInvalid(new OpenAiChatCompletionRequest { Model = "valid", Messages = [new OpenAiMessage { Role = "user", Content = Json(new object[] { new { text = "missing-type" } }) }] }, "unsupported_content_part");
@@ -102,12 +105,27 @@ public sealed class OpenAiChatRequestValidatorTests
 
     private static OpenAiChatRequestValidator Validator(GatewayOptions? options = null) => new(MsOptions.Create(options ?? new GatewayOptions()), new StaticRegistry());
 
-    private static OpenAiChatCompletionRequest Request(string model, float? temperature = null, float? topP = null, int? maxTokens = null, JsonElement? stop = null, Dictionary<string, JsonElement>? metadata = null, bool stream = false) => new()
+    [Fact]
+    public async Task Validator_validates_max_completion_tokens()
+    {
+        await AssertInvalid(Request("valid", maxCompletionTokens: 0), "max_completion_tokens_invalid");
+        await AssertInvalid(Request("valid", maxCompletionTokens: 11), "max_completion_tokens_exceeds_model_limit");
+
+        var valid = await Validator().ValidateAsync(Request("valid", maxCompletionTokens: 5), CancellationToken.None);
+        Assert.True(valid.IsValid);
+
+        // Inbound max_completion_tokens is preserved on the mapped AiChatRequest.
+        var mapped = Validator().Validate(new DefaultHttpContext(), Request("valid", maxCompletionTokens: 5));
+        Assert.Equal(5, mapped.AiRequest!.Options.MaxCompletionTokens);
+    }
+
+    private static OpenAiChatCompletionRequest Request(string model, float? temperature = null, float? topP = null, int? maxTokens = null, JsonElement? stop = null, Dictionary<string, JsonElement>? metadata = null, bool stream = false, int? maxCompletionTokens = null) => new()
     {
         Model = model,
         Temperature = temperature,
         TopP = topP,
         MaxTokens = maxTokens,
+        MaxCompletionTokens = maxCompletionTokens,
         Stop = stop,
         Metadata = metadata,
         Stream = stream,

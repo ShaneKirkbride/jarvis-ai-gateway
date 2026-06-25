@@ -607,6 +607,11 @@ public sealed class StreamingChatCompletionHttpTests : IClassFixture<StreamingCh
             builder.UseEnvironment("Development");
             builder.ConfigureAppConfiguration((_, config) =>
             {
+                // Drop inherited appsettings*.json so this factory fully owns Gateway:Models and
+                // AzureOpenAi config — otherwise the base appsettings' azure models leak provider
+                // fields into these Bedrock test models via index-based config merge (which would
+                // route them to the real Azure endpoint).
+                TestConfig.RemoveJsonSources(config);
                 config.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["Jwt:Authority"] = "https://issuer.example.test/",

@@ -19,7 +19,7 @@ public static class AiChatRequestMapper
         return new AiChatRequest(
             request.Model,
             messages,
-            new AiGenerationOptions(request.Temperature, request.TopP, request.MaxTokens, stopSequences ?? []),
+            new AiGenerationOptions(request.Temperature, request.TopP, request.MaxTokens, stopSequences ?? [], request.MaxCompletionTokens),
             new Dictionary<string, string>(),
             request.Stream);
     }

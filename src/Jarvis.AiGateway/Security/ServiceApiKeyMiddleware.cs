@@ -39,6 +39,16 @@ public sealed class ServiceApiKeyMiddleware(RequestDelegate next, IOptions<Gatew
             return;
         }
 
+        // A developer API key (validated upstream by DeveloperApiKeyMiddleware) is a first-class
+        // user credential and satisfies gateway entry on its own — it does NOT also require the
+        // service-to-service key. The flag is set server-side after a validated lookup, so this is
+        // not a bypass a client can trigger.
+        if (DeveloperApiKeyContext.IsAuthenticated(context))
+        {
+            await next(context);
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_options.ServiceApiKey))
         {
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;

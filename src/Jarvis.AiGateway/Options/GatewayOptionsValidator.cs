@@ -70,10 +70,7 @@ public sealed class GatewayOptionsValidator(IHostEnvironment? hostEnvironment = 
                 failures.Add("Every Gateway:Models entry must define Alias.");
             }
 
-            if (string.IsNullOrWhiteSpace(model.BedrockModelId))
-            {
-                failures.Add($"Gateway:Models entry '{model.Alias}' must define BedrockModelId.");
-            }
+            ValidateModelProviderShape(model, failures);
 
             if (model.MaxInputCharacters < 1)
             {
@@ -89,8 +86,36 @@ public sealed class GatewayOptionsValidator(IHostEnvironment? hostEnvironment = 
         }
 
         ValidateIdentityBrokerOptions(options.IdentityBroker, failures);
+        ValidateDeveloperAuthOptions(options.DeveloperAuth, failures);
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+    }
+
+    // Provider-aware identifier validation.  Each provider requires its own routing identifier, and
+    // an unrecognized ProviderName fails closed — a typo must refuse startup, not silently route
+    // nowhere.
+    private static void ValidateModelProviderShape(ModelRouteOptions model, List<string> failures)
+    {
+        var provider = string.IsNullOrWhiteSpace(model.ProviderName) ? "aws-bedrock" : model.ProviderName.Trim();
+
+        if (provider.Equals("aws-bedrock", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(model.BedrockModelId))
+            {
+                failures.Add($"Gateway:Models entry '{model.Alias}' must define BedrockModelId.");
+            }
+        }
+        else if (provider.Equals("azure-openai", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(model.AzureDeploymentName))
+            {
+                failures.Add($"Gateway:Models entry '{model.Alias}' uses ProviderName 'azure-openai' and must define AzureDeploymentName.");
+            }
+        }
+        else
+        {
+            failures.Add($"Gateway:Models entry '{model.Alias}' has an unknown ProviderName '{model.ProviderName}'. Supported providers: aws-bedrock, azure-openai.");
+        }
     }
 
     private static void ValidateModelIdentityShape(ModelRouteOptions model, bool brokerEnabled, List<string> failures)
@@ -118,6 +143,44 @@ public sealed class GatewayOptionsValidator(IHostEnvironment? hostEnvironment = 
             if (!Guid.TryParse(id, out _))
             {
                 failures.Add($"Gateway:Models entry '{model.Alias}' has a non-GUID value in {source}: '{id}'. Entra group object IDs are GUIDs.");
+            }
+        }
+    }
+
+    // Developer API-key auth fails closed at readiness when enabled but misconfigured: a missing
+    // pepper would make every key un-hashable, and a key entry without an id/hash/owner cannot be
+    // authorized safely.
+    private static void ValidateDeveloperAuthOptions(DeveloperAuthOptions developerAuth, List<string> failures)
+    {
+        if (!developerAuth.Enabled)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(developerAuth.HashPepper) || LooksLikePlaceholder(developerAuth.HashPepper))
+        {
+            failures.Add("Gateway:DeveloperAuth:HashPepper must be a real secret when developer auth is enabled.");
+        }
+
+        if (string.IsNullOrWhiteSpace(developerAuth.KeyPrefix))
+        {
+            failures.Add("Gateway:DeveloperAuth:KeyPrefix must not be empty.");
+        }
+
+        for (var i = 0; i < developerAuth.Keys.Count; i++)
+        {
+            var key = developerAuth.Keys[i];
+            if (string.IsNullOrWhiteSpace(key.KeyId))
+            {
+                failures.Add($"Gateway:DeveloperAuth:Keys[{i}]:KeyId is required.");
+            }
+            if (string.IsNullOrWhiteSpace(key.KeyHash))
+            {
+                failures.Add($"Gateway:DeveloperAuth:Keys[{i}]:KeyHash is required.");
+            }
+            if (string.IsNullOrWhiteSpace(key.OwnerSubject) && string.IsNullOrWhiteSpace(key.OwnerEmail))
+            {
+                failures.Add($"Gateway:DeveloperAuth:Keys[{i}] must define OwnerSubject or OwnerEmail.");
             }
         }
     }

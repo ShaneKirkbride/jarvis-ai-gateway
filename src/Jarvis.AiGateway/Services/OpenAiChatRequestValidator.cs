@@ -72,6 +72,24 @@ public sealed class OpenAiChatRequestValidator : IOpenAiChatRequestValidator
             errors.Add(new("model_required", "The 'model' field is required.", "model"));
         }
 
+        // Tool/function calling (Phase 1): capability-gated. Detect any tool usage up front so the
+        // text-only default stays unchanged for non-tool requests, and tools fail closed otherwise.
+        var usesTools = (request.Tools is { Count: > 0 })
+            || (request.Messages?.Any(m => m is not null &&
+                    (string.Equals(m.Role, "tool", StringComparison.OrdinalIgnoreCase) || m.ToolCalls is { Count: > 0 })) ?? false);
+
+        if (usesTools && request.Stream)
+        {
+            errors.Add(new("tool_streaming_not_supported", "Streaming is not supported for requests that include tools in this gateway version. Retry with \"stream\": false.", "stream"));
+        }
+
+        // The capability gate only applies once the model is resolved (the orchestrator's second
+        // validation pass). The first pass (model unknown) builds the request so policy can run.
+        if (usesTools && resolvedModel is not null && !resolvedModel.SupportsTools)
+        {
+            errors.Add(new("tools_not_supported", $"Model '{resolvedModel.Id}' does not support tool/function calling.", "tools"));
+        }
+
         var messages = new List<AiMessage>();
         if (request.Messages is null || request.Messages.Count == 0)
         {
@@ -94,13 +112,43 @@ public sealed class OpenAiChatRequestValidator : IOpenAiChatRequestValidator
                     continue;
                 }
 
-                if (string.IsNullOrWhiteSpace(message.Role) || !SupportedRoles.Contains(message.Role))
+                var isToolMessage = string.Equals(message.Role, "tool", StringComparison.OrdinalIgnoreCase);
+                var isAssistantToolCall = string.Equals(message.Role, "assistant", StringComparison.OrdinalIgnoreCase) && message.ToolCalls is { Count: > 0 };
+
+                if (string.IsNullOrWhiteSpace(message.Role) || (!SupportedRoles.Contains(message.Role) && !isToolMessage))
                 {
-                    errors.Add(new("unsupported_role", $"Message at index {i} uses unsupported role '{message.Role}'. Supported roles are system, user, and assistant.", $"messages[{i}].role"));
+                    errors.Add(new("unsupported_role", $"Message at index {i} uses unsupported role '{message.Role}'. Supported roles are system, user, assistant, and tool.", $"messages[{i}].role"));
+                    continue;
                 }
-                else if (!message.Role.Equals("system", StringComparison.OrdinalIgnoreCase))
+
+                if (!message.Role.Equals("system", StringComparison.OrdinalIgnoreCase))
                 {
                     hasNonSystemMessage = true;
+                }
+
+                if (isToolMessage)
+                {
+                    // Tool result returned by the client. Treated as untrusted content (redacted /
+                    // ITAR-routed downstream like any prompt). Requires the originating call id.
+                    if (string.IsNullOrWhiteSpace(message.ToolCallId))
+                    {
+                        errors.Add(new("tool_call_id_required", $"Tool message at index {i} requires 'tool_call_id'.", $"messages[{i}].tool_call_id"));
+                        continue;
+                    }
+
+                    messages.Add(new AiMessage("tool", ExtractRawText(message), ToolCallId: message.ToolCallId));
+                    continue;
+                }
+
+                if (isAssistantToolCall)
+                {
+                    if (!TryBuildToolCalls(message.ToolCalls!, i, errors, out var toolCalls))
+                    {
+                        continue;
+                    }
+
+                    messages.Add(new AiMessage("assistant", ExtractOptionalText(message), ToolCalls: toolCalls));
+                    continue;
                 }
 
                 if (!message.TryGetTextContent(out var text, out var error))
@@ -137,9 +185,19 @@ public sealed class OpenAiChatRequestValidator : IOpenAiChatRequestValidator
             errors.Add(new("max_tokens_invalid", "The 'max_tokens' field must be positive when supplied.", "max_tokens"));
         }
 
+        if (request.MaxCompletionTokens is <= 0)
+        {
+            errors.Add(new("max_completion_tokens_invalid", "The 'max_completion_tokens' field must be positive when supplied.", "max_completion_tokens"));
+        }
+
         if (resolvedModel is not null && request.MaxTokens is { } maxTokens && maxTokens > resolvedModel.MaxOutputTokens)
         {
             errors.Add(new("max_tokens_exceeds_model_limit", $"The 'max_tokens' field exceeds the configured maximum of {resolvedModel.MaxOutputTokens} for model '{resolvedModel.Id}'.", "max_tokens"));
+        }
+
+        if (resolvedModel is not null && request.MaxCompletionTokens is { } maxCompletionTokens && maxCompletionTokens > resolvedModel.MaxOutputTokens)
+        {
+            errors.Add(new("max_completion_tokens_exceeds_model_limit", $"The 'max_completion_tokens' field exceeds the configured maximum of {resolvedModel.MaxOutputTokens} for model '{resolvedModel.Id}'.", "max_completion_tokens"));
         }
 
         // Note: stream=true is no longer rejected here. Streaming is fully supported; whether a
@@ -149,6 +207,8 @@ public sealed class OpenAiChatRequestValidator : IOpenAiChatRequestValidator
 
         var stopSequences = GetStopSequences(request.Stop, errors);
         var metadata = GetMetadata(request.Metadata, errors);
+        var tools = BuildTools(request.Tools, errors);
+        var toolChoice = ParseToolChoice(request.ToolChoice, tools, errors);
 
         if (errors.Count > 0)
         {
@@ -158,12 +218,124 @@ public sealed class OpenAiChatRequestValidator : IOpenAiChatRequestValidator
         var aiRequest = new AiChatRequest(
             request.Model,
             messages,
-            new AiGenerationOptions(request.Temperature, request.TopP, request.MaxTokens, stopSequences),
+            new AiGenerationOptions(request.Temperature, request.TopP, request.MaxTokens, stopSequences, request.MaxCompletionTokens),
             metadata,
-            request.Stream);
+            request.Stream,
+            tools,
+            toolChoice);
 
         return OpenAiChatValidationResult.Success(aiRequest);
     }
+
+    private static string ExtractRawText(OpenAiMessage message) => message.Content.ValueKind switch
+    {
+        JsonValueKind.String => message.Content.GetString() ?? string.Empty,
+        JsonValueKind.Undefined or JsonValueKind.Null => string.Empty,
+        // A tool result sent as a JSON object/array is preserved as its raw JSON text (and is
+        // redacted/ITAR-routed downstream like any other content).
+        _ => message.Content.GetRawText()
+    };
+
+    private static string ExtractOptionalText(OpenAiMessage message) => message.Content.ValueKind switch
+    {
+        JsonValueKind.String => message.Content.GetString() ?? string.Empty,
+        _ => string.Empty
+    };
+
+    private static bool TryBuildToolCalls(List<OpenAiToolCall> toolCalls, int messageIndex, List<OpenAiValidationError> errors, out List<AiToolCall> built)
+    {
+        built = [];
+        foreach (var call in toolCalls)
+        {
+            if (call is null || string.IsNullOrWhiteSpace(call.Id) || string.IsNullOrWhiteSpace(call.Function?.Name))
+            {
+                errors.Add(new("invalid_tool_call", $"Assistant message at index {messageIndex} has a tool_call missing id or function.name.", $"messages[{messageIndex}].tool_calls"));
+                return false;
+            }
+
+            built.Add(new AiToolCall(call.Id, call.Function.Name, call.Function.Arguments ?? string.Empty));
+        }
+
+        return true;
+    }
+
+    private List<AiToolDefinition>? BuildTools(List<OpenAiTool>? tools, List<OpenAiValidationError> errors)
+    {
+        if (tools is null || tools.Count == 0)
+        {
+            return null;
+        }
+
+        if (tools.Count > _options.RequestValidation.MaxTools)
+        {
+            errors.Add(new("too_many_tools", $"The 'tools' field may contain at most {_options.RequestValidation.MaxTools} tools.", "tools"));
+            return null;
+        }
+
+        var built = new List<AiToolDefinition>(tools.Count);
+        for (var i = 0; i < tools.Count; i++)
+        {
+            var function = tools[i]?.Function;
+            if (function is null || string.IsNullOrWhiteSpace(function.Name))
+            {
+                errors.Add(new("invalid_tool", $"tools[{i}] must define function.name.", $"tools[{i}].function.name"));
+                continue;
+            }
+
+            var parameters = function.Parameters ?? EmptyObjectSchema;
+            if (parameters.ValueKind != JsonValueKind.Undefined &&
+                parameters.GetRawText().Length > _options.RequestValidation.MaxToolSchemaBytes)
+            {
+                errors.Add(new("tool_schema_too_large", $"tools[{i}] parameters schema exceeds {_options.RequestValidation.MaxToolSchemaBytes} bytes.", $"tools[{i}].function.parameters"));
+                continue;
+            }
+
+            built.Add(new AiToolDefinition(function.Name, function.Description, parameters));
+        }
+
+        return built.Count > 0 ? built : null;
+    }
+
+    private static AiToolChoice? ParseToolChoice(JsonElement? toolChoice, List<AiToolDefinition>? tools, List<OpenAiValidationError> errors)
+    {
+        if (toolChoice is not { } choice || choice.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (choice.ValueKind == JsonValueKind.String)
+        {
+            var mode = choice.GetString();
+            if (mode is "auto" or "none" or "required")
+            {
+                return new AiToolChoice(mode);
+            }
+
+            errors.Add(new("invalid_tool_choice", "The 'tool_choice' string must be one of: auto, none, required.", "tool_choice"));
+            return null;
+        }
+
+        if (choice.ValueKind == JsonValueKind.Object &&
+            choice.TryGetProperty("function", out var fn) &&
+            fn.ValueKind == JsonValueKind.Object &&
+            fn.TryGetProperty("name", out var nameEl) &&
+            nameEl.ValueKind == JsonValueKind.String)
+        {
+            var name = nameEl.GetString()!;
+            if (tools is null || !tools.Any(t => t.Name.Equals(name, StringComparison.Ordinal)))
+            {
+                errors.Add(new("tool_choice_unknown_function", $"tool_choice references function '{name}' which is not declared in 'tools'.", "tool_choice"));
+                return null;
+            }
+
+            return new AiToolChoice("function", name);
+        }
+
+        errors.Add(new("invalid_tool_choice", "The 'tool_choice' field must be a string (auto|none|required) or a {type:function, function:{name}} object.", "tool_choice"));
+        return null;
+    }
+
+    private static readonly JsonElement EmptyObjectSchema = JsonDocument.Parse("{\"type\":\"object\",\"properties\":{}}").RootElement.Clone();
 
     private void AddHeaderErrors(HttpContext context, List<OpenAiValidationError> errors)
     {

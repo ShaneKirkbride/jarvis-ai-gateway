@@ -65,6 +65,15 @@ public sealed class IdentityBrokerMiddleware
             return;
         }
 
+        // A developer API key already established a validated user principal upstream; the broker
+        // must not then demand an OWUI assertion for the same request.  Authorization (policy,
+        // ITAR, groups) still runs downstream on that principal exactly as for a broker user.
+        if (DeveloperApiKeyContext.IsAuthenticated(context))
+        {
+            await _next(context);
+            return;
+        }
+
         if (IsHealthOrReadinessProbe(context))
         {
             await _next(context);

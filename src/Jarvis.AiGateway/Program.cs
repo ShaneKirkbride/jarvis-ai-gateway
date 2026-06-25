@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Json;
 using Amazon;
+using Azure.Identity;
 using Amazon.Bedrock;
 using Amazon.Bedrock.Model;
 using Amazon.BedrockRuntime;
@@ -35,9 +36,12 @@ builder.Logging.AddJsonConsole(options =>
 });
 
 builder.Services.AddOptions<GatewayOptions>()
-    .Bind(builder.Configuration.GetSection("Gateway"))
-    .ValidateOnStart();
-builder.Services.AddSingleton<IValidateOptions<GatewayOptions>, GatewayOptionsValidator>();
+    .Bind(builder.Configuration.GetSection("Gateway"));
+// ValidateOnStart()/IValidateOptions registration is intentionally NOT used. The same strict
+// GatewayOptionsValidator rules now run inside IConfigHealth and gate readiness (503 + protected
+// routes fail closed) instead of throwing at startup and crash-looping the container. Hard startup
+// failures are reserved for unrecoverable problems (DI graph, programming errors). Security-critical
+// misconfiguration still fails closed — it just surfaces via /healthz/ready and a 503 on /v1/*.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
 
 var gatewayOptions = builder.Configuration.GetSection("Gateway").Get<GatewayOptions>() ?? new GatewayOptions();
@@ -128,10 +132,14 @@ builder.Services.AddRateLimiter(options =>
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.AddPolicy("per-user", httpContext =>
     {
-        var key = httpContext.User.FindFirstValue("sub")
-            ?? httpContext.User.Identity?.Name
-            ?? httpContext.Connection.RemoteIpAddress?.ToString()
-            ?? "anonymous";
+        // Per-key limiting for developer API keys (so one key cannot exhaust a user's whole
+        // budget across keys); per-user for everyone else.
+        var key = httpContext.User.FindFirstValue(DeveloperApiKeyClaims.KeyIdClaim) is { Length: > 0 } apiKeyId
+            ? $"apikey:{apiKeyId}"
+            : httpContext.User.FindFirstValue("sub")
+                ?? httpContext.User.Identity?.Name
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous";
 
         return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
         {
@@ -241,6 +249,7 @@ builder.Services.AddSingleton<IModelRegistry, ModelRegistry>();
 builder.Services.AddSingleton<IPolicyRule, ModelConfiguredRule>();
 builder.Services.AddSingleton<IPolicyRule, ModelEnabledRule>();
 builder.Services.AddSingleton<IPolicyRule, ModelTextOutputRule>();
+builder.Services.AddSingleton<IPolicyRule, DeveloperKeyModelAllowlistRule>();
 builder.Services.AddSingleton<IPolicyRule, GroupAuthorizationRule>();
 builder.Services.AddSingleton<IPolicyRule, PromptSizeRule>();
 builder.Services.AddSingleton<IPolicyRule, BlockedPatternRule>();
@@ -249,17 +258,133 @@ builder.Services.AddSingleton<IPolicyRule, ItarWorkspaceRule>();
 builder.Services.AddSingleton<IPolicyEngine>(sp => new PolicyEngine(sp.GetRequiredService<IModelRegistry>(), sp.GetServices<IPolicyRule>()));
 builder.Services.AddSingleton<IOpenAiChatRequestValidator, OpenAiChatRequestValidator>();
 builder.Services.AddSingleton<IOpenAiErrorMapper, OpenAiErrorMapper>();
-builder.Services.AddSingleton<IChatCompletionOrchestrator, ChatCompletionOrchestrator>();
+// Explicit factory: ChatCompletionOrchestrator has two public constructors (production +
+// strategy-based test convenience) that are not parameter supersets of one another, which the
+// built-in container would treat as ambiguous. Selecting the production constructor here removes
+// the ambiguity.
+builder.Services.AddSingleton<IChatCompletionOrchestrator>(sp => new ChatCompletionOrchestrator(
+    sp.GetRequiredService<IUserContextFactory>(),
+    sp.GetRequiredService<IRequestContextFactory>(),
+    sp.GetRequiredService<IOpenAiChatRequestValidator>(),
+    sp.GetRequiredService<IPolicyEngine>(),
+    sp.GetServices<IAiProvider>(),
+    sp.GetRequiredService<IContentRedactor>(),
+    sp.GetRequiredService<IAuditLogger>(),
+    sp.GetRequiredService<IOpenAiErrorMapper>(),
+    sp.GetRequiredService<IGatewayMetrics>(),
+    sp.GetRequiredService<IOptions<GatewayOptions>>(),
+    sp.GetRequiredService<ResiliencePipeline>()));
+builder.Services.AddSingleton<IEmbeddingsOrchestrator>(sp => new EmbeddingsOrchestrator(
+    sp.GetRequiredService<IUserContextFactory>(),
+    sp.GetRequiredService<IRequestContextFactory>(),
+    sp.GetRequiredService<IPolicyEngine>(),
+    sp.GetServices<IAiProvider>(),
+    sp.GetRequiredService<IAuditLogger>(),
+    sp.GetRequiredService<IOpenAiErrorMapper>(),
+    sp.GetRequiredService<IGatewayMetrics>(),
+    sp.GetRequiredService<IOptions<GatewayOptions>>(),
+    sp.GetRequiredService<ResiliencePipeline>()));
+builder.Services.AddSingleton<ICompletionsOrchestrator>(sp => new CompletionsOrchestrator(
+    sp.GetRequiredService<IUserContextFactory>(),
+    sp.GetRequiredService<IRequestContextFactory>(),
+    sp.GetRequiredService<IPolicyEngine>(),
+    sp.GetServices<IAiProvider>(),
+    sp.GetRequiredService<IContentRedactor>(),
+    sp.GetRequiredService<IAuditLogger>(),
+    sp.GetRequiredService<IOpenAiErrorMapper>(),
+    sp.GetRequiredService<IGatewayMetrics>(),
+    sp.GetRequiredService<IOptions<GatewayOptions>>(),
+    sp.GetRequiredService<ResiliencePipeline>()));
+// Anthropic Messages API compatibility (Phase 4). A wire-format adapter over the same chat
+// pipeline (validator/policy/provider/redaction/audit); text content only, non-streaming.
+builder.Services.AddSingleton<IMessagesOrchestrator>(sp => new MessagesOrchestrator(
+    sp.GetRequiredService<IUserContextFactory>(),
+    sp.GetRequiredService<IRequestContextFactory>(),
+    sp.GetRequiredService<IOpenAiChatRequestValidator>(),
+    sp.GetRequiredService<IPolicyEngine>(),
+    sp.GetServices<IAiProvider>(),
+    sp.GetRequiredService<IContentRedactor>(),
+    sp.GetRequiredService<IAuditLogger>(),
+    sp.GetRequiredService<IOpenAiErrorMapper>(),
+    sp.GetRequiredService<IGatewayMetrics>(),
+    sp.GetRequiredService<IOptions<GatewayOptions>>(),
+    sp.GetRequiredService<ResiliencePipeline>()));
 builder.Services.AddSingleton<IReadinessCheck, GatewayReadinessCheck>();
 builder.Services.AddSingleton<IGatewayMetrics, GatewayMetrics>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockConverseInvocationStrategy>();
 builder.Services.AddSingleton<IBedrockInvocationStrategy, BedrockInvokeModelTextInvocationStrategy>();
 builder.Services.AddSingleton<IBedrockStreamingStrategy, BedrockConverseStreamInvocationStrategy>();
+
+// ── AI providers ─────────────────────────────────────────────────────────────
+// The orchestrator routes by GatewayModel.ProviderName. BedrockProvider wraps the existing
+// Bedrock strategies; AzureOpenAiProvider talks to Azure OpenAI (incl. Government) over HTTP.
+builder.Services.AddOptions<AzureOpenAiOptions>()
+    .Bind(builder.Configuration.GetSection("Gateway:AzureOpenAi"));
+builder.Services.AddHttpClient(AzureOpenAiProvider.HttpClientName);
+builder.Services.AddSingleton<IAzureOpenAiCredential>(sp =>
+{
+    var azureOptions = sp.GetRequiredService<IOptions<AzureOpenAiOptions>>();
+    if (azureOptions.Value.AuthenticationMode == AzureOpenAiAuthenticationMode.ManagedIdentity)
+    {
+        // Select the AAD authority by cloud so the managed-identity token is issued by the
+        // correct sovereign cloud (Government vs. commercial), inferred from the endpoint host.
+        var credentialOptions = new DefaultAzureCredentialOptions();
+        if (AzureOpenAiScopes.ForEndpoint(azureOptions.Value.Endpoint) == AzureOpenAiScopes.UsGovernment)
+        {
+            credentialOptions.AuthorityHost = AzureAuthorityHosts.AzureGovernment;
+        }
+
+        return new ManagedIdentityAzureOpenAiCredential(new DefaultAzureCredential(credentialOptions), azureOptions);
+    }
+
+    return new ApiKeyAzureOpenAiCredential(azureOptions);
+});
+builder.Services.AddSingleton<IAiProvider, BedrockProvider>();
+builder.Services.AddSingleton<IAiProvider, AzureOpenAiProvider>();
+
+// Config health: strict validation that gates readiness instead of crash-looping the container.
+builder.Services.AddSingleton<IConfigHealth, ConfigHealth>();
+
+// ── Developer (IDE/client) API-key authentication ────────────────────────────
+// Separate from the service-to-service key. Off unless Gateway:DeveloperAuth:Enabled=true.
+// The authenticator resolves the key owner's LIVE Entra groups via IGraphGroupResolver (injected
+// only when the identity broker is configured), so a developer key is authorization-equivalent to
+// a JWT/broker user and can never escalate beyond the owner's current membership.
+builder.Services.AddSingleton<IDeveloperApiKeyHasher, DeveloperApiKeyHasher>();
+builder.Services.AddSingleton<IDeveloperApiKeyStore, ConfiguredDeveloperApiKeyStore>();
+builder.Services.AddSingleton<IDeveloperApiKeyAuthenticator, DeveloperApiKeyAuthenticator>();
+
+// Internal API discoverability (OpenAPI JSON at /openapi/v1.json). Off by default; enable only on
+// internal builds. Still subject to the normal auth pipeline (service or developer key).
+if (gatewayOptions.Discovery.OpenApiEnabled)
+{
+    builder.Services.AddOpenApi();
+}
+
 builder.Services.AddSingleton<IAuditLogger, AuditLogger>();
 
 var app = builder.Build();
 
+// Surface configuration problems once at startup so operators see WHY the gateway is not ready,
+// instead of an opaque CrashLoopBackOff.  The process stays up to serve health endpoints.
+var configHealth = app.Services.GetRequiredService<IConfigHealth>();
+if (!configHealth.IsReady)
+{
+    var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+    foreach (var problem in configHealth.Problems)
+    {
+        startupLogger.LogError("Gateway configuration problem: {Path} — {Message}", problem.Path, problem.Message);
+    }
+}
+
 app.UseMiddleware<CorrelationIdMiddleware>();
+// Fail protected /v1 routes closed (503) when critical config is invalid — never serve against a
+// misconfigured gateway. Placed before auth so a misconfigured deploy returns a clear 503.
+app.UseMiddleware<ConfigHealthGateMiddleware>();
+// Developer API-key auth runs before the service-key and broker middlewares: a valid jrvs_ bearer
+// establishes the user principal and a server-side flag so those middlewares pass it through; a
+// present-but-invalid developer key fails closed here. No-op when no jrvs_ bearer is present.
+app.UseMiddleware<DeveloperApiKeyMiddleware>();
 app.UseMiddleware<ServiceApiKeyMiddleware>();
 
 if (gatewayOptions.IdentityBroker.Enabled)
@@ -282,6 +407,11 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
 
+if (gatewayOptions.Discovery.OpenApiEnabled)
+{
+    app.MapOpenApi();
+}
+
 app.MapGet("/healthz", () => Results.Ok(new
 {
     status = "healthy",
@@ -289,6 +419,21 @@ app.MapGet("/healthz", () => Results.Ok(new
     environment = gatewayOptions.EnvironmentName,
     timeUtc = DateTimeOffset.UtcNow
 }));
+
+// Liveness: the process is running. Always 200 unless the host is truly dead — never gated on
+// configuration, so a misconfigured-but-running container is not killed and recycled forever.
+app.MapGet("/healthz/live", () => Results.Ok(new { status = "alive", timeUtc = DateTimeOffset.UtcNow }));
+
+// Readiness: 200 only when critical config is valid and providers are initialized; otherwise a
+// safe, redacted 503 listing the configuration problems by path.
+app.MapGet("/healthz/ready", (IConfigHealth health) => health.IsReady
+    ? Results.Json(new { status = "ready", timeUtc = DateTimeOffset.UtcNow })
+    : Results.Json(new
+    {
+        status = "unhealthy",
+        code = ConfigHealth.InvalidCode,
+        errors = health.Problems.Select(p => new { path = p.Path, message = p.Message })
+    }, statusCode: StatusCodes.Status503ServiceUnavailable));
 
 app.MapGet("/readyz", async (IReadinessCheck readinessCheck, CancellationToken cancellationToken) =>
 {
@@ -308,11 +453,16 @@ app.MapGet("/v1/models", async (
         CancellationToken cancellationToken) =>
     {
         var user = userContextFactory.Create(principal);
-        var visibleModels = await policyEngine.GetVisibleModelsAsync(user, cancellationToken);
+        var chatModels = await policyEngine.GetVisibleModelsAsync(user, cancellationToken);
+        var embeddingModels = await policyEngine.GetVisibleEmbeddingModelsAsync(user, cancellationToken);
+        var completionModels = await policyEngine.GetVisibleCompletionModelsAsync(user, cancellationToken);
         var response = new OpenAiModelListResponse
         {
-            Data = visibleModels
-                .Select(m => new OpenAiModelInfo { Id = m.Id, OwnedBy = "aws-bedrock" })
+            Data = chatModels.Concat(embeddingModels).Concat(completionModels)
+                .GroupBy(m => m.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(ModelCapabilityMapper.ToModelInfo)
                 .ToList()
         };
 
@@ -327,6 +477,41 @@ app.MapPost("/v1/chat/completions", async (
         CancellationToken cancellationToken) =>
     {
         return await orchestrator.CompleteAsync(httpContext, request, cancellationToken);
+    })
+    .RequireAuthorization()
+    .RequireRateLimiting("per-user");
+
+app.MapPost("/v1/embeddings", async (
+        HttpContext httpContext,
+        OpenAiEmbeddingsRequest request,
+        IEmbeddingsOrchestrator orchestrator,
+        CancellationToken cancellationToken) =>
+    {
+        return await orchestrator.EmbedAsync(httpContext, request, cancellationToken);
+    })
+    .RequireAuthorization()
+    .RequireRateLimiting("per-user");
+
+app.MapPost("/v1/completions", async (
+        HttpContext httpContext,
+        OpenAiCompletionRequest request,
+        ICompletionsOrchestrator orchestrator,
+        CancellationToken cancellationToken) =>
+    {
+        return await orchestrator.CompleteAsync(httpContext, request, cancellationToken);
+    })
+    .RequireAuthorization()
+    .RequireRateLimiting("per-user");
+
+// Anthropic-compatible Messages endpoint (Phase 4) so Claude-native clients (Claude Code, Zed, …)
+// can point at the gateway. Maps onto the same chat policy/provider/redaction/audit pipeline.
+app.MapPost("/v1/messages", async (
+        HttpContext httpContext,
+        AnthropicMessagesRequest request,
+        IMessagesOrchestrator orchestrator,
+        CancellationToken cancellationToken) =>
+    {
+        return await orchestrator.CreateMessageAsync(httpContext, request, cancellationToken);
     })
     .RequireAuthorization()
     .RequireRateLimiting("per-user");

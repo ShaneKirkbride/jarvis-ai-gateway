@@ -20,6 +20,16 @@ public sealed class ProviderTimeoutException(string message, Exception? innerExc
 /// </summary>
 public sealed class ProviderResponseParseException(string message, Exception? innerException = null) : Exception(message, innerException);
 
+/// <summary>
+/// Thrown when Azure OpenAI returns a non-success HTTP status.  Carries only the status code —
+/// never the response body — so provider-internal detail is not surfaced to callers.
+/// </summary>
+public sealed class AzureOpenAiException(System.Net.HttpStatusCode statusCode, Exception? innerException = null)
+    : Exception($"Azure OpenAI returned HTTP {(int)statusCode}.", innerException)
+{
+    public System.Net.HttpStatusCode StatusCode { get; } = statusCode;
+}
+
 public sealed class OpenAiErrorMapper : IOpenAiErrorMapper
 {
     public OpenAiErrorMapping MapValidation(OpenAiChatValidationResult validationResult)
@@ -84,6 +94,7 @@ public sealed class OpenAiErrorMapper : IOpenAiErrorMapper
                 OpenAiErrorResponse.Create("Provider rejected the invocation request.", "server_error", "provider_validation_error"),
                 "provider_validation_error",
                 "provider"),
+            AzureOpenAiException azure => MapAzure(azure),
             _ => new OpenAiErrorMapping(
                 StatusCodes.Status502BadGateway,
                 OpenAiErrorResponse.Create("Gateway provider invocation failed.", "server_error", "gateway_error"),
@@ -91,4 +102,40 @@ public sealed class OpenAiErrorMapper : IOpenAiErrorMapper
                 "unexpected")
         };
     }
+
+    // Maps Azure OpenAI HTTP statuses to stable, curated client-facing codes.  The provider-side
+    // status, error code, message, and body are NEVER echoed verbatim — only these curated values.
+    private static OpenAiErrorMapping MapAzure(AzureOpenAiException exception) => (int)exception.StatusCode switch
+    {
+        // Invalid request / unsupported parameter (e.g. a model-incompatible field).
+        400 => new OpenAiErrorMapping(
+            StatusCodes.Status502BadGateway,
+            OpenAiErrorResponse.Create("Provider rejected the invocation request.", "server_error", "provider_validation_error"),
+            "provider_validation_error",
+            "provider"),
+        // Provider authentication / authorization failure (bad or missing key / identity).
+        401 or 403 => new OpenAiErrorMapping(
+            StatusCodes.Status502BadGateway,
+            OpenAiErrorResponse.Create("Provider authentication failed.", "server_error", "provider_auth_error"),
+            "provider_auth_error",
+            "provider"),
+        // Throttling — surfaced as 429 so callers can back off.
+        429 => new OpenAiErrorMapping(
+            StatusCodes.Status429TooManyRequests,
+            OpenAiErrorResponse.Create("Provider throttled the request.", "server_error", "provider_throttled"),
+            "provider_throttled",
+            "provider"),
+        // Transient/server-side provider failures.
+        >= 500 => new OpenAiErrorMapping(
+            StatusCodes.Status503ServiceUnavailable,
+            OpenAiErrorResponse.Create("Provider is temporarily unavailable.", "server_error", "provider_unavailable"),
+            "provider_unavailable",
+            "provider"),
+        // Any other non-success status.
+        _ => new OpenAiErrorMapping(
+            StatusCodes.Status502BadGateway,
+            OpenAiErrorResponse.Create("Gateway provider invocation failed.", "server_error", "provider_error"),
+            "provider_error",
+            "provider")
+    };
 }

@@ -24,7 +24,8 @@ namespace Jarvis.AiGateway.Services;
 /// </summary>
 public sealed class OpenAiSseStreamResult : IResult
 {
-    private readonly IBedrockStreamingStrategy _strategy;
+    private readonly IAiProvider _provider;
+    private readonly string _invocationStrategy;
     private readonly GatewayModel _model;
     private readonly AiChatRequest _request;
     private readonly RequestContext _context;
@@ -41,7 +42,7 @@ public sealed class OpenAiSseStreamResult : IResult
     private readonly long _created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
     public OpenAiSseStreamResult(
-        IBedrockStreamingStrategy strategy,
+        IAiProvider provider,
         GatewayModel model,
         AiChatRequest request,
         RequestContext context,
@@ -52,9 +53,11 @@ public sealed class OpenAiSseStreamResult : IResult
         IGatewayMetrics metrics,
         IContentRedactor redactor,
         GatewayOptions options,
-        Stopwatch stopwatch)
+        Stopwatch stopwatch,
+        string invocationStrategy)
     {
-        _strategy = strategy;
+        _provider = provider;
+        _invocationStrategy = invocationStrategy;
         _model = model;
         _request = request;
         _context = context;
@@ -74,7 +77,7 @@ public sealed class OpenAiSseStreamResult : IResult
         // timeout — a long-lived stream is normal, and aborting it mid-flight would corrupt
         // the SSE response.
         var cancellationToken = httpContext.RequestAborted;
-        var enumerator = _strategy.StreamAsync(_model, _request, _context, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        var enumerator = _provider.StreamAsync(_model, _request, _context, cancellationToken).GetAsyncEnumerator(cancellationToken);
 
         bool hasEvent;
         try
@@ -237,7 +240,7 @@ public sealed class OpenAiSseStreamResult : IResult
         _audit.TokenEstimate = usage?.TotalTokens;
         _audit.LatencyMs = _stopwatch.ElapsedMilliseconds;
         _audit.Provider = _model.ProviderName;
-        _audit.InvocationStrategy = _strategy.Name;
+        _audit.InvocationStrategy = _invocationStrategy;
         _auditLogger.Write(_audit);
     }
 
