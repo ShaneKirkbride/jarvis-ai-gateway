@@ -1,0 +1,33 @@
+{
+  "name": "jarvis-vscode-example",
+  "displayName": "Jarvis Gateway Example",
+  "description": "Example VS Code extension for the Jarvis AI Gateway OpenAI-compatible API.",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "vscode": "^1.92.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:jarvis.askSelection", "onCommand:jarvis.configureApiKey", "onCommand:jarvis.refreshModels"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "jarvis.askSelection", "title": "Jarvis: Ask About Selection" },
+      { "command": "jarvis.configureApiKey", "title": "Jarvis: Configure Developer API Key" },
+      { "command": "jarvis.refreshModels", "title": "Jarvis: Refresh Models" }
+    ],
+    "configuration": {
+      "title": "Jarvis Gateway",
+      "properties": {
+        "jarvis.baseUrl": { "type": "string", "default": "https://<gateway>/v1", "description": "Jarvis gateway /v1 base URL." },
+        "jarvis.model": { "type": "string", "default": "jarvis2-chat", "description": "Gateway model alias." },
+        "jarvis.sendSelectionOnly": { "type": "boolean", "default": true, "description": "Only send selected editor text." },
+        "jarvis.confirmBeforeSend": { "type": "boolean", "default": true, "description": "Ask before sending selected text." },
+        "jarvis.maxSelectionCharacters": { "type": "number", "default": 8000, "minimum": 1, "description": "Maximum selected characters allowed per Jarvis request." }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node dist/test/gatewayClient.test.js"
+  },
+  "devDependencies": { "@types/node": "^20.14.0", "@types/vscode": "^1.92.0", "typescript": "^5.5.0" }
+}
